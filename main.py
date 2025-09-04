@@ -83,21 +83,12 @@ BRAND_NAME = os.getenv("BRAND_NAME", "Paginatto")
 SITE_URL = os.getenv("SITE_URL", "")
 SUPPORT_URL = os.getenv("SUPPORT_URL", SITE_URL)
 CNPJ = os.getenv("CNPJ", "")
+
 SECURITY_BLURB = os.getenv(
     "SECURITY_BLURB",
     "Checkout com HTTPS e PSP oficial. Não pedimos senhas ou códigos."
 )
 
-MAX_DISCOUNT_PCT = int(os.getenv("MAX_DISCOUNT_PCT", "10"))
-INSTAGRAM_HANDLE = os.getenv("INSTAGRAM_HANDLE", "@Paginatto")
-INSTAGRAM_URL = os.getenv("INSTAGRAM_URL", "https://instagram.com/Paginatto")
-
-CHECKOUT_RESUME_BASE = os.getenv("CHECKOUT_RESUME_BASE", "")
-
-
-    "SECURITY_BLURB",
-    "Checkout com HTTPS e PSP oficial. Não pedimos senhas ou códigos."
-)
 CHECKOUT_RESUME_BASE = os.getenv("CHECKOUT_RESUME_BASE", "")
 
 ZAPI_INSTANCE = os.getenv("ZAPI_INSTANCE", "")
@@ -105,8 +96,12 @@ ZAPI_TOKEN = os.getenv("ZAPI_TOKEN", "")
 ZAPI_CLIENT_TOKEN = os.getenv("ZAPI_CLIENT_TOKEN", "")
 SEND_TEXT_PATH = os.getenv("SEND_TEXT_PATH", "/send-text")
 
-CARTPANDA_API_BASE = os.getenv("CARTPANDA_API_BASE", "")  # opcional
-CARTPANDA_API_TOKEN = os.getenv("CARTPANDA_API_TOKEN", "")  # opcional
+MAX_DISCOUNT_PCT = int(os.getenv("MAX_DISCOUNT_PCT", "10"))
+INSTAGRAM_HANDLE = os.getenv("INSTAGRAM_HANDLE", "@Paginatto")
+INSTAGRAM_URL = os.getenv("INSTAGRAM_URL", "https://instagram.com/Paginatto")
+
+CARTPANDA_API_BASE = os.getenv("CARTPANDA_API_BASE", "")
+CARTPANDA_API_TOKEN = os.getenv("CARTPANDA_API_TOKEN", "")
 
 if not (OPENAI_API_KEY and ZAPI_INSTANCE and ZAPI_TOKEN and ZAPI_CLIENT_TOKEN):
     raise RuntimeError("Defina OPENAI_API_KEY, ZAPI_INSTANCE, ZAPI_TOKEN, ZAPI_CLIENT_TOKEN no .env")
