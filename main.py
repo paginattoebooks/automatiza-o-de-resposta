@@ -13,6 +13,21 @@ Pronto para subir no Render. Python 3.11+.
   SECURITY_BLURB=Checkout com HTTPS, PSP oficial para PIX, dados criptografados. Não pedimos senha/código.
   CHECKOUT_RESUME_BASE=https://seu-checkout.exemplo/resume/
 
+  # --- Catálogo simples ---
+PRODUCTS = {
+  "tabib": {
+    "title": "Tabib",
+    "kind": "ebook",
+    "blurb": "ebook digital exclusivo da Paginatto",
+    "delivery": "acesso imediato por e-mail e WhatsApp após pagamento",
+    "url": SITE_URL,
+  },
+}
+PROD_ALIASES = {
+  "tabib": ["tabib", "o tabib", "livro tabib"]
+}
+
+
   ZAPI_INSTANCE=xxxxxxxxxxxxxxxx
   ZAPI_TOKEN=xxxxxxxxxxxxxxxx
   ZAPI_CLIENT_TOKEN=xxxxxxxxxxxxxxxx
@@ -136,6 +151,13 @@ def normalize_phone(v: str) -> str:
     if d and not d.startswith("55"):
         d = "55" + d
     return d
+
+def detect_product(text: str) -> Optional[str]:
+    t = (text or "").lower()
+    for pid, aliases in PROD_ALIASES.items():
+        if any(a in t for a in aliases):
+            return pid
+    return None
 
 
 def parse_bool(x: Any) -> bool:
@@ -298,7 +320,9 @@ SYSTEM_TEMPLATE = (
     "Se pagamento travou → pergunte em que etapa e ofereça link de retomada. "
     "Se citar Instagram/engajamento → ofereça bônus após seguir e comentar 3 posts; peça @ para validar. "
     "Nunca peça senhas/códigos. Não prometa alterar preço automaticamente; se aceitar desconto, diga que vai ajustar e enviar o link atualizado."
-    ""Se houver DADOS_DO_PEDIDO, responda citando nº, status e link de retomada (quando existir). "
+    "Se houver DADOS_DO_PEDIDO, responda citando nº, status e link de retomada (quando existir). "
+    "Se reconhecer um produto foco, explique que é ebook digital e como recebe. Ofereça link de compra. Responda em no máximo 2 frases."
+
 
 )
 
@@ -316,7 +340,15 @@ def system_prompt(extra_context: Optional[Dict[str, Any]], hints: Optional[Dict[
     if extra_context and extra_context.get("cart_token") and CHECKOUT_RESUME_BASE:
         base += f" Use este resume_link quando apropriado: {CHECKOUT_RESUME_BASE}{extra_context['cart_token']}"
     # Dicas explícitas
-    if hints:
+        # Dados do produto, se houver
+    if hints and hints.get("product_id") in PRODUCTS:
+        p = PRODUCTS[hints["product_id"]]
+        base += (
+            f" Produto foco: {p['title']} ({p['kind']}). "
+            f"Entregue como: {p['delivery']}. "
+            f"URL base: {p['url']}."
+        )
+      if hints:
         focos = [k for k, v in hints.items() if v]
         if focos:
             base += " | FOCO: " + ",".join(focos)
@@ -407,6 +439,12 @@ async def zapi_receive(request: Request):
     ctx = order_context_by_keys(phone, text)
     if ctx is None:
         ctx = await cartpanda_lookup(order_no=orderno_from_text(text), cpf=cpf_from_text(text))
+        
+    product_id = detect_product(text)
+    hints = analyze_intent(text)
+    if product_id:
+        hints["product_id"] = product_id
+
 
     hints = analyze_intent(text)
 
