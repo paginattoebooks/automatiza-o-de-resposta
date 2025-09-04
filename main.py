@@ -310,21 +310,30 @@ def analyze_intent(text: str) -> dict:
 
 
 SYSTEM_TEMPLATE = (
-    "Comece com '{greeting}, {name}! Tudo bem?' (sem nome: '{greeting}! Tudo bem?'). "
-    "Respostas curtas: até 2 frases e 160 caracteres. Sem textão. "
-    "Se 'desisti' → pergunte o motivo. "
-    "Se falta de saldo → ofereça até {maxdisc}% de desconto; pergunte se aceita. "
-    "Se segurança → diga que o checkout é HTTPS/PSP oficial e convide a ver {insta} e {site} apenas se pedir. "
-    "Se não recebeu por e-mail → confirme e-mail e ofereça reenvio; pode enviar pelo WhatsApp. "
-    "Se achou que era físico → avise que é ebook digital e cite benefícios. "
-    "Se pagamento travou → pergunte em que etapa e ofereça link de retomada. "
-    "Se citar Instagram/engajamento → ofereça bônus após seguir e comentar 3 posts; peça @ para validar. "
-    "Nunca peça senhas/códigos. Não prometa alterar preço automaticamente; se aceitar desconto, diga que vai ajustar e enviar o link atualizado."
-    "Se houver DADOS_DO_PEDIDO, responda citando nº, status e link de retomada (quando existir). "
-    "Se reconhecer um produto foco, explique que é ebook digital e como recebe. Ofereça link de compra. Responda em no máximo 2 frases."
-
-
+  "Comece com '{greeting}, {name}! Tudo bem?' (sem nome: '{greeting}! Tudo bem?'). "
+  "Respostas curtas: até 2 frases e 160 caracteres. Sem textão. "
+  "Se 'desisti' → pergunte o motivo. "
+  "Se falta de saldo → ofereça até {maxdisc}% de desconto; pergunte se aceita. "
+  "Se segurança → diga que o checkout é HTTPS/PSP oficial e convide a ver {insta} e {site} se pedir. "
+  "Se não recebeu por e-mail → confirme e-mail e ofereça reenvio; pode enviar pelo WhatsApp. "
+  "Se achou que era físico → avise que é ebook digital e cite benefícios; pode propor preço especial. "
+  "Se pagamento travou → pergunte em que etapa e ofereça link de retomada. "
+  "Se citar Instagram/engajamento → ofereça bônus após seguir e comentar 3 posts; peça @ para validar. "
+  "Nunca peça senhas/códigos. "
+  "Se houver DADOS_DO_PEDIDO, cite nº, status e link de retomada (quando existir). "
+  "Se reconhecer um produto foco, explique que é ebook digital e como recebe. Ofereça link. "
 )
+
+def br_greeting() -> str:
+  try:
+    h = datetime.now(ZoneInfo("America/Sao_Paulo")).hour if ZoneInfo else datetime.utcnow().hour
+  except Exception:
+    h = datetime.utcnow().hour
+  if 5 <= h < 12:
+    return "Bom dia"
+  if 12 <= h < 18:
+    return "Boa tarde"
+  return "Boa noite"
 
 def system_prompt(extra_context: Optional[Dict[str, Any]], hints: Optional[Dict[str,bool]] = None) -> str:
     greeting = br_greeting()
