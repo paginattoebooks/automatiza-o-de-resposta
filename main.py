@@ -173,24 +173,34 @@ def orderno_from_text(text: str) -> Optional[str]:
 
 
 def order_context_by_keys(phone: str, text: str) -> Optional[Dict[str, Any]]:
-    # 1) último pedido visto para este telefone (via webhook CartPanda)
-    order_no = LAST_ORDER_BY_PHONE.get(phone)
-    if order_no and order_no in ORDERS_BY_NO:
-        return ORDERS_BY_NO[order_no]
+  # 1) último pedido visto para este telefone
+  order_no = LAST_ORDER_BY_PHONE.get(phone)
+  if order_no and order_no in ORDERS_BY_NO:
+    ctx = ORDERS_BY_NO[order_no]
+    if ctx.get("cart_token") and CHECKOUT_RESUME_BASE:
+      ctx["resume_link"] = f"{CHECKOUT_RESUME_BASE}{ctx['cart_token']}"
+    return ctx
 
-    # 2) mensagem contém nº de pedido
-    order_no = orderno_from_text(text or "")
-    if order_no and order_no in ORDERS_BY_NO:
-        return ORDERS_BY_NO[order_no]
+  # 2) mensagem contém nº de pedido
+  order_no = orderno_from_text(text or "")
+  if order_no and order_no in ORDERS_BY_NO:
+    ctx = ORDERS_BY_NO[order_no]
+    if ctx.get("cart_token") and CHECKOUT_RESUME_BASE:
+      ctx["resume_link"] = f"{CHECKOUT_RESUME_BASE}{ctx['cart_token']}"
+    return ctx
 
-    # 3) mensagem contém CPF
-    cpf = cpf_from_text(text or "")
-    if cpf and cpf in ORDERS_BY_CPF:
-        nos = ORDERS_BY_CPF[cpf]
-        if nos:
-            return ORDERS_BY_NO.get(nos[-1])  # mais recente indexado
+  # 3) mensagem contém CPF
+  cpf = cpf_from_text(text or "")
+  if cpf and cpf in ORDERS_BY_CPF:
+    nos = ORDERS_BY_CPF[cpf]
+    if nos:
+      ctx = ORDERS_BY_NO.get(nos[-1])  # mais recente
+      if ctx and ctx.get("cart_token") and CHECKOUT_RESUME_BASE:
+        ctx["resume_link"] = f"{CHECKOUT_RESUME_BASE}{ctx['cart_token']}"
+      return ctx
 
-    return None
+  return None
+
 
 
 async def cartpanda_lookup(order_no: Optional[str] = None, cpf: Optional[str] = None, email: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -265,6 +275,20 @@ def analyze_intent(text: str) -> dict:
         "payment_problem": has("não consegui pagar","nao consegui pagar","pagamento","pix","boleto","cartão","cartao","checkout"),
         "instagram_bonus": has("instagram","comentar","comente","siga","seguir","post"),
         "support": has("suporte","ajuda","atendimento"),
+      
+      def order_summary(ctx: Optional[Dict[str, Any]]) -> str:
+    if not ctx:
+        return ""
+    parts = []
+    if ctx.get("order_no"): parts.append(f"Pedido: {ctx['order_no']}")
+    if ctx.get("payment_status"): parts.append(f"Pagamento: {ctx['payment_status']}")
+    if ctx.get("customer", {}).get("name"): parts.append(f"Cliente: {ctx['customer']['name']}")
+    if ctx.get("customer", {}).get("email"): parts.append(f"E-mail: {ctx['customer']['email']}")
+    if ctx.get("customer", {}).get("document"): parts.append(f"CPF: {ctx['customer']['document']}")
+    if ctx.get("checkout_url"): parts.append(f"Checkout: {ctx['checkout_url']}")
+    if ctx.get("resume_link"): parts.append(f"Retomar: {ctx['resume_link']}")
+    return " | ".join(parts)
+
     }
 
 
@@ -275,10 +299,12 @@ SYSTEM_TEMPLATE = (
     "Se falta de saldo → ofereça até {maxdisc}% de desconto; pergunte se aceita. "
     "Se segurança → diga que o checkout é HTTPS/PSP oficial e convide a ver {insta} e {site} apenas se pedir. "
     "Se não recebeu por e-mail → confirme e-mail e ofereça reenvio; pode enviar pelo WhatsApp. "
-    "Se achou que era físico → avise que é ebook digital e cite benefícios; pode propor preço especial. "
+    "Se achou que era físico → avise que é ebook digital e cite benefícios. "
     "Se pagamento travou → pergunte em que etapa e ofereça link de retomada. "
     "Se citar Instagram/engajamento → ofereça bônus após seguir e comentar 3 posts; peça @ para validar. "
     "Nunca peça senhas/códigos. Não prometa alterar preço automaticamente; se aceitar desconto, diga que vai ajustar e enviar o link atualizado."
+    ""Se houver DADOS_DO_PEDIDO, responda citando nº, status e link de retomada (quando existir). "
+
 )
 
 def system_prompt(extra_context: Optional[Dict[str, Any]], hints: Optional[Dict[str,bool]] = None) -> str:
@@ -315,15 +341,29 @@ def system_prompt(extra_context: Optional[Dict[str, Any]], hints: Optional[Dict[
 
 
 async def llm_reply(history: List[Dict[str, str]], ctx: Optional[Dict[str, Any]], hints: Optional[Dict[str,bool]]) -> str:
-    messages = [
-        {"role": "system", "content": system_prompt(ctx, hints)}
-    ] + history[-12:]
+    sys = {"role": "system", "content": system_prompt(ctx, hints)}
+    msgs = [sys]
+
+    # Se houver pedido, entregue um resumo explícito ANTES do usuário.
+    if ctx:
+        msgs.append({"role": "assistant", "content": f"DADOS_DO_PEDIDO: {order_summary(ctx)}"})
+
+    msgs += history[-12:]
+
     resp = OPENAI.chat.completions.create(
         model="gpt-4o-mini",
         temperature=0.3,
-        messages=messages,
+        messages=msgs,
     )
-    return resp.choices[0].message.content.strip()
+    txt = resp.choices[0].message.content.strip()
+
+    # Fallback: nunca dizer “não tenho acesso”. Se sem contexto, peça dado. Se falhar, handoff humano.
+    if not ctx and ("acesso" in txt.lower() or "não consigo" in txt.lower()):
+        return (
+            "Preciso do nº do pedido ou CPF pra te passar os detalhes. "
+            "Se preferir, falo com o time humano agora."
+        )
+    return txt
 
 
 
@@ -366,7 +406,6 @@ async def zapi_receive(request: Request):
     if not phone or not text:
         return JSONResponse({"status": "ignored", "reason": "missing phone or text"})
 
-    # sessão + contexto
     convo = SESSIONS.setdefault(phone, [])
     convo.append({"role": "user", "content": text})
 
@@ -379,10 +418,7 @@ async def zapi_receive(request: Request):
     try:
         reply = await llm_reply(convo, ctx, hints)
     except Exception:
-        reply = (
-            f"Sou {ASSISTANT_NAME}. Tive um erro agora. Pode reformular? "
-            f"Se preferir, fale 'suporte' que encaminho para atendimento humano."
-        )
+        reply = f"Sou {ASSISTANT_NAME}. Deu erro agora. Posso te passar pro time humano?"
 
     convo.append({"role": "assistant", "content": reply})
 
@@ -395,6 +431,7 @@ async def zapi_receive(request: Request):
 
 
 
+
 @app.post("/webhook/zapi/status")
 async def zapi_status(request: Request):
     _ = await request.json()
@@ -404,40 +441,45 @@ async def zapi_status(request: Request):
 @app.post("/webhook/cartpanda/order")
 async def cartpanda_order(request: Request):
     data = await request.json()
-    # Aceita payload genérico do CartPanda. Ajuste os campos conforme seu webhook real.
-    event = data.get("event") or data.get("type")
-    d = data.get("data") or data
+    d = data.get("data", {}) or data  # alguns envios vêm sem "data"
 
     order_no = str(d.get("order_no") or d.get("number") or d.get("id") or d.get("orderNumber") or "").strip()
     customer = d.get("customer") or {}
     email = (customer.get("email") or d.get("email") or "").strip().lower()
     phone = normalize_phone(customer.get("phone") or d.get("phone") or "")
     cpf = digits_only(customer.get("document") or d.get("document") or d.get("cpf") or "")
-    payment_status = d.get("payment_status") or d.get("status")
-    cart_token = d.get("cart_token") or d.get("cartToken")
-    checkout_url = d.get("checkout_url") or d.get("checkoutUrl")
-    total = d.get("total") or d.get("amount")
+    status = (d.get("payment_status") or d.get("status") or "").strip().lower()
+    checkout_url = d.get("checkout_url") or ""
+    cart_token = d.get("cart_token") or ""
 
-    order_obj = {
-        "event": event,
+    if not order_no:
+        return JSONResponse({"indexed": False, "reason": "missing order_no"})
+
+    ctx = {
         "order_no": order_no,
-        "customer": {"name": customer.get("name") or d.get("name"), "email": email, "phone": phone, "document": cpf},
-        "payment_status": payment_status,
-        "cart_token": cart_token,
+        "payment_status": status,
         "checkout_url": checkout_url,
-        "total": total,
+        "cart_token": cart_token,
+        "customer": {
+            "name": customer.get("name") or d.get("name") or "",
+            "email": email,
+            "phone": phone,
+            "document": cpf,
+        },
     }
+    if cart_token and CHECKOUT_RESUME_BASE:
+        ctx["resume_link"] = f"{CHECKOUT_RESUME_BASE}{cart_token}"
 
-    if order_no:
-        ORDERS_BY_NO[order_no] = order_obj
+    # índices
+    ORDERS_BY_NO[order_no] = ctx
     if cpf:
         ORDERS_BY_CPF.setdefault(cpf, []).append(order_no)
     if email:
         ORDERS_BY_EMAIL.setdefault(email, []).append(order_no)
-    if phone and order_no:
+    if phone:
         LAST_ORDER_BY_PHONE[phone] = order_no
 
-    return {"indexed": True, "order_no": order_no}
+    return JSONResponse({"indexed": True, "order_no": order_no})
 
 
 @app.post("/webhook/cartpanda/support")
