@@ -63,6 +63,12 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
+from datetime import datetime
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
+
 import httpx
 
 # OpenAI SDK oficial
@@ -78,6 +84,17 @@ SITE_URL = os.getenv("SITE_URL", "")
 SUPPORT_URL = os.getenv("SUPPORT_URL", SITE_URL)
 CNPJ = os.getenv("CNPJ", "")
 SECURITY_BLURB = os.getenv(
+    "SECURITY_BLURB",
+    "Checkout com HTTPS e PSP oficial. Não pedimos senhas ou códigos."
+)
+
+MAX_DISCOUNT_PCT = int(os.getenv("MAX_DISCOUNT_PCT", "10"))
+INSTAGRAM_HANDLE = os.getenv("INSTAGRAM_HANDLE", "@Paginatto")
+INSTAGRAM_URL = os.getenv("INSTAGRAM_URL", "https://instagram.com/Paginatto")
+
+CHECKOUT_RESUME_BASE = os.getenv("CHECKOUT_RESUME_BASE", "")
+
+
     "SECURITY_BLURB",
     "Checkout com HTTPS e PSP oficial. Não pedimos senhas ou códigos."
 )
@@ -223,24 +240,68 @@ def compact_order_view(o: Dict[str, Any]) -> Dict[str, Any]:
         "cart_token": o.get("cart_token"),
         "total": o.get("total") or o.get("amount")
     }
+      def br_greeting() -> str:
+    try:
+        h = datetime.now(ZoneInfo("America/Sao_Paulo")).hour if ZoneInfo else datetime.utcnow().hour
+    except Exception:
+        h = datetime.utcnow().hour
+    if 5 <= h < 12: return "Bom dia"
+    if 12 <= h < 18: return "Boa tarde"
+    return "Boa noite"
+
+def first_name(v):
+    n = (v or "").strip()
+    return n.split()[0].title() if n else ""
+
+def analyze_intent(text: str) -> dict:
+    t = (text or "").lower()
+    has = lambda *xs: any(x in t for x in xs)
+    return {
+        "ask_why_desist": has("desisti","desist"),
+        "low_balance": has("sem saldo","falta de saldo","sem limite","cartão sem limite","cartao sem limite","saldo"),
+        "security": has("seguran","golpe","fraude","medo"),
+        "not_received_email": has("não chegou","nao chegou","não recebi","nao recebi","e-mail","email"),
+        "thinks_physical": has("livro físico","livro fisico","fisico"),
+        "payment_problem": has("não consegui pagar","nao consegui pagar","pagamento","pix","boleto","cartão","cartao","checkout"),
+        "instagram_bonus": has("instagram","comentar","comente","siga","seguir","post"),
+        "support": has("suporte","ajuda","atendimento"),
+    }
 
 
 SYSTEM_TEMPLATE = (
-    "Você é {assistant} da {brand}. Fale português do Brasil. Tom humano, direto, cordial. "
-    "Nada de menus. Faça perguntas curtas quando útil. Proponha próximo passo. "
-    "Se for pagamento: pergunte em que etapa travou e ofereça reenvio do link. "
-    "Segurança: {security}. Cite site oficial {site} e suporte {support} quando fizer sentido. "
-    "Nunca peça senhas/códigos. Não invente dados de pedido. Responda em até 3 parágrafos curtos."
+    "Comece com '{greeting}, {name}! Tudo bem?' (sem nome: '{greeting}! Tudo bem?'). "
+    "Respostas curtas: até 2 frases e 160 caracteres. Sem textão. "
+    "Se 'desisti' → pergunte o motivo. "
+    "Se falta de saldo → ofereça até {maxdisc}% de desconto; pergunte se aceita. "
+    "Se segurança → diga que o checkout é HTTPS/PSP oficial e convide a ver {insta} e {site} apenas se pedir. "
+    "Se não recebeu por e-mail → confirme e-mail e ofereça reenvio; pode enviar pelo WhatsApp. "
+    "Se achou que era físico → avise que é ebook digital e cite benefícios; pode propor preço especial. "
+    "Se pagamento travou → pergunte em que etapa e ofereça link de retomada. "
+    "Se citar Instagram/engajamento → ofereça bônus após seguir e comentar 3 posts; peça @ para validar. "
+    "Nunca peça senhas/códigos. Não prometa alterar preço automaticamente; se aceitar desconto, diga que vai ajustar e enviar o link atualizado."
 )
 
-
-def system_prompt(extra_context: Optional[Dict[str, Any]]) -> str:
+def system_prompt(extra_context: Optional[Dict[str, Any]], hints: Optional[Dict[str,bool]] = None) -> str:
+    greeting = br_greeting()
+    name = first_name(((extra_context or {}).get("customer") or {}).get("name") or (extra_context or {}).get("name"))
     base = SYSTEM_TEMPLATE.format(
-        assistant=ASSISTANT_NAME,
-        brand=BRAND_NAME,
-        security=SECURITY_BLURB,
+        greeting=greeting,
+        name=name or "",
+        maxdisc=MAX_DISCOUNT_PCT,
+        insta=f"{INSTAGRAM_HANDLE} ({INSTAGRAM_URL})",
         site=SITE_URL,
-        support=SUPPORT_URL,
+    )
+    # Link de retomada quando existir
+    if extra_context and extra_context.get("cart_token") and CHECKOUT_RESUME_BASE:
+        base += f" Use este resume_link quando apropriado: {CHECKOUT_RESUME_BASE}{extra_context['cart_token']}"
+    # Dicas explícitas
+    if hints:
+        focos = [k for k, v in hints.items() if v]
+        if focos:
+            base += " | FOCO: " + ",".join(focos)
+    return base
+
+
     )
     if not extra_context:
         return base
@@ -253,9 +314,9 @@ def system_prompt(extra_context: Optional[Dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
-async def llm_reply(history: List[Dict[str, str]], ctx: Optional[Dict[str, Any]]) -> str:
+async def llm_reply(history: List[Dict[str, str]], ctx: Optional[Dict[str, Any]], hints: Optional[Dict[str,bool]]) -> str:
     messages = [
-        {"role": "system", "content": system_prompt(ctx)}
+        {"role": "system", "content": system_prompt(ctx, hints)}
     ] + history[-12:]
     resp = OPENAI.chat.completions.create(
         model="gpt-4o-mini",
@@ -265,10 +326,12 @@ async def llm_reply(history: List[Dict[str, str]], ctx: Optional[Dict[str, Any]]
     return resp.choices[0].message.content.strip()
 
 
+
 # --- Webhooks ---
 @app.get("/health")
 async def health():
     return {"ok": True}
+
 
 
 @app.post("/webhook/zapi/receive")
@@ -276,7 +339,8 @@ async def zapi_receive(request: Request):
     data = await request.json()
 
     msg_id = (
-        data.get("messageId") or data.get("id") or data.get("message", {}).get("id") or (data.get("messages", [{}])[0] or {}).get("id")
+        data.get("messageId") or data.get("id") or data.get("message", {}).get("id")
+        or (data.get("messages", [{}])[0] or {}).get("id")
     )
     if msg_id and msg_id in SEEN_IDS:
         return JSONResponse({"status": "duplicate_ignored"})
@@ -284,22 +348,17 @@ async def zapi_receive(request: Request):
         SEEN_IDS.add(msg_id)
 
     phone = (
-        data.get("phone")
-        or data.get("from")
-        or data.get("chatId")
+        data.get("phone") or data.get("from") or data.get("chatId")
         or (data.get("contact", {}) or {}).get("phone")
         or (data.get("message", {}) or {}).get("from")
-        or (data.get("messages", [{}])[0] or {}).get("from")
-        or ""
+        or (data.get("messages", [{}])[0] or {}).get("from") or ""
     )
     text = (
-        data.get("text")
-        or data.get("body")
+        data.get("text") or data.get("body")
         or (data.get("message") if isinstance(data.get("message"), str) else None)
         or (data.get("message", {}) or {}).get("text")
         or (data.get("messages", [{}])[0] or {}).get("text")
-        or (data.get("messages", [{}])[0] or {}).get("body")
-        or ""
+        or (data.get("messages", [{}])[0] or {}).get("body") or ""
     )
 
     phone = normalize_phone(str(phone))
@@ -307,21 +366,22 @@ async def zapi_receive(request: Request):
     if not phone or not text:
         return JSONResponse({"status": "ignored", "reason": "missing phone or text"})
 
-    # sessão + contexto de pedido
+    # sessão + contexto
     convo = SESSIONS.setdefault(phone, [])
     convo.append({"role": "user", "content": text})
 
     ctx = order_context_by_keys(phone, text)
     if ctx is None:
-        # tentativa opcional de lookup direto via API
         ctx = await cartpanda_lookup(order_no=orderno_from_text(text), cpf=cpf_from_text(text))
 
+    hints = analyze_intent(text)
+
     try:
-        reply = await llm_reply(convo, ctx)
+        reply = await llm_reply(convo, ctx, hints)
     except Exception:
         reply = (
-            f"Sou {ASSISTANT_NAME}. Tive um erro para responder agora. "
-            f"Pode reformular? Se preferir, fale 'suporte' que encaminho para atendimento humano."
+            f"Sou {ASSISTANT_NAME}. Tive um erro agora. Pode reformular? "
+            f"Se preferir, fale 'suporte' que encaminho para atendimento humano."
         )
 
     convo.append({"role": "assistant", "content": reply})
@@ -332,6 +392,7 @@ async def zapi_receive(request: Request):
         return JSONResponse({"status": "sent_error", "detail": ex.detail})
 
     return JSONResponse({"status": "sent", "zapi": out})
+
 
 
 @app.post("/webhook/zapi/status")
