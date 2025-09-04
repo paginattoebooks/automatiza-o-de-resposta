@@ -129,7 +129,7 @@ ZAPI_HEADERS = {"Client-Token": ZAPI_CLIENT_TOKEN, "Content-Type": "application/
 
 # --- Util ---
 CPF_RX = re.compile(r"(\d{3}\.?\d{3}\.?\d{3}-?\d{2})")
-ORDER_RX = re.compile(r"\b(\d{6,12})\b")  # ajuste se seu nº de pedido tiver outro formato
+ORDER_RX = re.compile(r"\b(\d{5,12})\b")  # ajuste se seu nº de pedido tiver outro formato
 
 
 def digits_only(v: str) -> str:
