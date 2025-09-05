@@ -20,6 +20,49 @@ from openai import OpenAI
 from datetime import datetime
 try:
     from zoneinfo import ZoneInfo
+REDIS = _redis.Redis.from_url(
+        os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+        decode_responses=True
+    )
+    # toque leve para validar conexão; se falhar cai no except
+    try:
+        REDIS.ping()
+    except Exception:
+        raise
+except Exception:
+    # Fallback simples em memória para não quebrar o app
+    class _Mem:
+        def __init__(self):
+            self.kv = {}
+            self.h = {}
+            self.l = {}
+            self.s = {}
+
+        # KV
+        def get(self, k): return self.kv.get(k)
+        def set(self, k, v): self.kv[k] = v
+
+        # HASH
+        def hset(self, name, key, value):
+            self.h.setdefault(name, {})[key] = value
+        def hget(self, name, key):
+            return self.h.get(name, {}).get(key)
+
+        # LIST
+        def rpush(self, name, value):
+            self.l.setdefault(name, []).append(value)
+        def lrange(self, name, start, end):
+            arr = self.l.get(name, [])
+            if end == -1: end = len(arr) - 1
+            return arr[start:end+1]
+
+        # SET
+        def sadd(self, name, value):
+            self.s.setdefault(name, set()).add(value)
+        def sismember(self, name, value):
+            return value in self.s.get(name, set())
+
+    REDIS = _Mem()
 except Exception:
     ZoneInfo = None
 
@@ -557,3 +600,4 @@ async def cartpanda_support(request: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
