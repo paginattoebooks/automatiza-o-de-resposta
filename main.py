@@ -41,6 +41,9 @@ import json, re, os
 
 PROD_FILE = os.getenv("PRODUCTS_FILE", "produtos_paginatto.json")
 
+def format_product_message(prod: dict) -> str:
+retornar (
+
 def _load_products():
   try:
     with open(PROD_FILE, "r", encoding="utf-8") as f:
@@ -566,30 +569,21 @@ async def zapi_send_text(phone: str, message: str) -> dict:
 async def zapi_receive(request: Request):
     data = await request.json()
 
-    # de-dup
-    msg_id = (
-        data.get("messageId") or data.get("id")
-        or (data.get("message", {}) or {}).get("id")
-        or (data.get("messages", [{}])[0] or {}).get("id")
-    )
-    if msg_id and msg_id in SEEN_IDS:
-        return JSONResponse({"status": "duplicate_ignored"})
-    if msg_id:
-        SEEN_IDS.add(msg_id)
-
-    # origem e texto
+    # Extrair telefone e texto da mensagem
     phone = (
         data.get("phone") or data.get("from") or data.get("chatId")
         or (data.get("contact", {}) or {}).get("phone")
         or (data.get("message", {}) or {}).get("from")
-        or (data.get("messages", [{}])[0] or {}).get("from") or ""
+        or (data.get("messages", [{}])[0] or {}).get("from")
+        or ""
     )
     text = (
         data.get("text") or data.get("body")
         or (data.get("message") if isinstance(data.get("message"), str) else None)
         or (data.get("message", {}) or {}).get("text")
         or (data.get("messages", [{}])[0] or {}).get("text")
-        or (data.get("messages", [{}])[0] or {}).get("body") or ""
+        or (data.get("messages", [{}])[0] or {}).get("body")
+        or ""
     )
 
     phone = normalize_phone(str(phone))
@@ -597,46 +591,24 @@ async def zapi_receive(request: Request):
     if not phone or not text:
         return JSONResponse({"status": "ignored", "reason": "missing phone or text"})
 
-    # handoff humano
-    if "humano" in text.lower():
-        await zapi_send_text(phone, "Te passo pro time agora.")
-        return JSONResponse({"status": "sent", "handoff": True})
+    # Verifica se a mensagem já foi processada (evita duplicados)
+    msg_id = (
+        data.get("messageId") or data.get("id") or data.get("message", {}).get("id") or (data.get("messages", [{}])[0] or {}).get("id")
+    )
+    if msg_id and msg_id in SEEN_IDS:
+        return JSONResponse({"status": "duplicate_ignored"})
+    if msg_id:
+        SEEN_IDS.add(msg_id)
 
-    # 1) SE PEDIR PRODUTO → MANDA CHECKOUT DIRETO (sem LLM)
-    prod = match_product(text)
-    if prod and prod.get("checkout"):
-        msg = f'Checkout do "{prod["name"]}": {prod["checkout"]}\nEntrega 100% digital.'
+    # Busca produto no texto
+    prod = find_product_in_text(text)
+    if prod:
+        msg = format_product_message(prod)
         await zapi_send_text(phone, msg)
         return JSONResponse({"status": "ok", "product": prod["name"]})
 
-    # 2) atalhos de entrega (sempre curto e sem site)
-    tl = text.lower()
-    entrega_kw = ["entrega","entregam","envio","frete","chega","chegar","prazo","rastreio","rastreamento","endereco","endereço"]
-    if any(k in tl for k in entrega_kw):
-        await zapi_send_text(
-            phone,
-            "É 100% digital. Você recebe por e-mail/WhatsApp após o pagamento. Posso te ajudar a finalizar?"
-        )
-        return JSONResponse({"status": "ok", "routed": "delivery"})
+    # ... resto do código do webhook ...
 
-    # 3) conversa normal (LLM), mas sem empurrar site
-    convo = SESSIONS.setdefault(phone, [])
-    convo.append({"role": "user", "content": text})
-
-    ctx = order_context_by_keys(phone, text)
-    if ctx is None:
-        ctx = await cartpanda_lookup(order_no=orderno_from_text(text), cpf=cpf_from_text(text))
-
-    hints = analyze_intent(text)
-
-    try:
-        reply = await llm_reply(convo, ctx, hints)
-    except Exception:
-        reply = "Deu erro aqui. Quer que eu chame o time humano?"
-
-    convo.append({"role": "assistant", "content": reply})
-    out = await zapi_send_text(phone, reply)
-    return JSONResponse({"status": "sent", "zapi": out})
 
 @app.post("/webhook/zapi/status")
 async def zapi_status(request: Request):
