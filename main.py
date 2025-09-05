@@ -37,42 +37,58 @@ from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 import httpx
 
-import json, re, os
+import json, os, re, unicodedata
 
-PROD_FILE = os.getenv("PRODUCTS_FILE", "produtos_paginatto.json")
+PRODUCTS_JSON_PATH = os.getenv("PRODUCTS_JSON_PATH", "produtos_paginatto.json")
 
-def format_product_message(prod: dict) -> str:
-retornar (
+def _norm(s: str) -> str:
+    s = (s or "").lower()
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", " ", s).strip()
 
-def _load_products():
-  try:
-    with open(PROD_FILE, "r", encoding="utf-8") as f:
-      items = json.load(f)
-  except Exception:
-    items = []
-  # normaliza e cria aliases
-  prods = []
-  for it in items:
-    name = it.get("name","").strip()
-    url  = it.get("checkout","").strip()
-    if not name or not url:
-      continue
-    nid = re.sub(r"[^a-z0-9]+"," ", name.lower()).strip()
-    aliases = {name.lower()}
-    # tabib volume N → gerar “tabib n”, “tabib vol n”, “tabib n”, “volume n”, “v n”
+def _make_aliases(name: str) -> set[str]:
+    a = {_norm(name)}
     m = re.search(r"(tabib).*?(?:volume|vol)?\s*(\d+)", name.lower())
     if m:
-      n = m.group(2)
-      aliases.update({
-        f"tabib {n}", f"tabib vol {n}", f"tabib volume {n}",
-        f"tabib{n}", f"volume {n}", f"v{n}", f"v {n}"
-      })
-    prods.append({
-      "name": name, "checkout": url,
-      "price": it.get("price"), "blurb": it.get("blurb"),
-      "aliases": list(aliases)
-    })
-  return prods
+        n = m.group(2)
+        a |= {_norm(x) for x in [
+            f"tabib {n}", f"tabib vol {n}", f"tabib volume {n}",
+            f"tabib{n}", f"volume {n}", f"v{n}", f"bibi {n}"
+        ]}
+    return a
+
+def load_products(path: str) -> list[dict]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            items = json.load(f)
+    except Exception:
+        items = []
+    prods = []
+    for it in items:
+        name = (it.get("name") or "").strip()
+        checkout = (it.get("checkout") or "").strip()
+        if not name or not checkout:
+            continue
+        prods.append({
+            "name": name,
+            "checkout": checkout,
+            "aliases": list(_make_aliases(name)),
+        })
+    return prods
+
+PRODUCTS = load_products(PRODUCTS_JSON_PATH)
+
+def find_product_in_text(text: str) -> dict | None:
+    q = _norm(text)
+    for p in PRODUCTS:
+        for a in p["aliases"]:
+            if a and a in q:
+                return p
+    # fallback: nome parcialmente contido
+    for p in PRODUCTS:
+        if _norm(p["name"]) in q or any(w in q for w in _norm(p["name"]).split()):
+            return p
+    return None
 
 # --- Catálogo embutido (sem arquivo externo) ---
 PRODUCTS = {
@@ -601,12 +617,15 @@ async def zapi_receive(request: Request):
         SEEN_IDS.add(msg_id)
 
     # Busca produto no texto
-    prod = find_product_in_text(text)
-    if prod:
-        msg = format_product_message(prod)
-        await zapi_send_text(phone, msg)
-        return JSONResponse({"status": "ok", "product": prod["name"]})
-
+   ```
+prod = find_product_in_text(text)
+if prod:
+    price = f" – {prod['price']}" if prod.get("price") else ""
+    blurb = f"\n{prod['blurb']}" if prod.get("blurb") else ""
+    reply = f"{prod["name"]}{price}\nCheckout: {prod["checkout"]}{blurb}"
+    await zapi_send_text(phone, reply)
+    return JSONResponse({"status":"ok","routed":"product_checkout"})
+```
     # ... resto do código do webhook ...
 
 
