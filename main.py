@@ -71,7 +71,47 @@ def _load_products():
     })
   return prods
 
-PRODUCTS = _load_products()
+# --- Catálogo embutido (sem arquivo externo) ---
+PRODUCTS = {
+    "tabib1": {"name": "Tabib Volume 1: Tratamento de Dores e Inflamações",
+               "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919679:1"},
+    "tabib2": {"name": "Tabib Volume 2: Saúde Respiratória e Imunidade",
+               "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919682:1"},
+    "tabib3": {"name": "Tabib Volume 3: Saúde Digestiva e Metabólica",
+               "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919686:1"},
+    "tabib4": {"name": "Tabib Volume 4: Saúde Mental e Energética",
+               "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919707:1"},
+    "tabib_full": {"name": "Tabib completo",
+                   "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/184229277:1"},
+    "tabib_2025_combo": {"name": "Tabib 2025 + Bônus 19,90 + Tabib 2024",
+                         "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/184229263:1"},
+    "antidoto": {"name": "Antídoto - Antídotos indígenas",
+                 "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919637:1"},
+    "kurima": {"name": "Kurimã - Óleos essenciais",
+               "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919661:1"},
+    "balsamo": {"name": "Bálsamo - Pomadas naturais",
+                "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919668:1"},
+    "pressao_alta": {"name": "Tratamento Natural Personalizado para Pressão Alta",
+                     "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/174502432:1"},
+    "airfryer": {"name": "300 receitas para AirFryer",
+                 "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/176702038:1"},
+}
+
+# aliases para achar pelo texto (inclui “bibi”)
+PROD_ALIASES = {
+    "tabib1": ["tabib 1", "tabib i", "volume 1", "v1", "bibi 1"],
+    "tabib2": ["tabib 2", "tabib ii", "volume 2", "v2", "bibi 2"],
+    "tabib3": ["tabib 3", "tabib iii", "volume 3", "v3", "bibi 3"],
+    "tabib4": ["tabib 4", "tabib iv", "volume 4", "v4", "bibi 4", "bibi volume 4", "tabib volume 4"],
+    "tabib_full": ["tabib completo", "coleção tabib", "combo tabib"],
+    "tabib_2025_combo": ["tabib 2025", "bônus 19,90", "tabib 2024", "combo 2025"],
+    "antidoto": ["antidoto", "antídoto"],
+    "kurima": ["kurima", "oleos essenciais", "óleos essenciais"],
+    "balsamo": ["balsamo", "bálsamo", "pomadas naturais"],
+    "pressao_alta": ["pressao alta", "pressão alta", "tratamento pressão"],
+    "airfryer": ["airfryer", "air fryer", "receitas airfryer", "300 receitas"],
+}
+
 
 from datetime import datetime
 try:
@@ -137,9 +177,36 @@ LAST_ORDER_BY_PHONE: Dict[str, str] = {}
 ZAPI_BASE = f"https://api.z-api.io/instances/{ZAPI_INSTANCE}/token/{ZAPI_TOKEN}"
 ZAPI_HEADERS = {"Client-Token": ZAPI_CLIENT_TOKEN, "Content-Type": "application/json"}
 
-# --- Utils ---
-CPF_RX = re.compile(r"(\d{3}\.?\d{3}\.?\d{3}-?\d{2})")
-ORDER_RX = re.compile(r"\b(\d{5,12})\b")  # aceita 5–12 dígitos
+import re
+
+def _norm(t: str) -> str:
+    t = (t or "").lower()
+    t = t.replace("ó", "o").replace("ô","o").replace("õ","o").replace("á","a").replace("à","a").replace("ã","a") \
+         .replace("é","e").replace("ê","e").replace("í","i").replace("ú","u").replace("ç","c")
+    return re.sub(r"[^a-z0-9 ]+", " ", t)
+
+def find_product_in_text(text: str):
+    t = _norm(text)
+    # prioridade “tabib” + número
+    if "tabib" in t or "bibi" in t:
+        if " 4" in f" {t} " or " iv" in f" {t} " or " volume 4" in t or " v4" in t:
+            return PRODUCTS["tabib4"]
+        if " 3" in f" {t} " or " iii" in f" {t} " or " volume 3" in t or " v3" in t:
+            return PRODUCTS["tabib3"]
+        if " 2" in f" {t} " or " ii" in f" {t} " or " volume 2" in t or " v2" in t:
+            return PRODUCTS["tabib2"]
+        if " 1" in f" {t} " or " i" in f" {t} " or " volume 1" in t or " v1" in t:
+            return PRODUCTS["tabib1"]
+        if "completo" in t or "colecao" in t or "combo" in t:
+            return PRODUCTS["tabib_full"]
+
+    # varre aliases gerais
+    for pid, aliases in PROD_ALIASES.items():
+        for a in aliases:
+            a_norm = _norm(a)
+            if a_norm and a_norm in t:
+                return PRODUCTS[pid]
+    return None
 
 
 def digits_only(v: str) -> str:
@@ -424,6 +491,22 @@ def system_prompt(extra_context: Optional[Dict[str, Any]], hints: Optional[Dict[
         if focos:
             base += " | FOCO: " + ",".join(focos)
     return base
+
+from typing import Optional
+
+def quick_routes(t: str) -> Optional[str]:
+    tl = (t or "").lower()
+    entrega_kw = [
+        "entrega", "entregam", "envio", "enviam", "frete", "chega", "chegar",
+        "chegou", "prazo", "rastreio", "rastreamento", "código de rastreio",
+        "endereco", "endereço"
+    ]
+    if any(k in tl for k in entrega_kw):
+        return (
+            "Nosso produto é 100% digital. Você recebe o acesso por e-mail e WhatsApp logo após o pagamento. "
+            "Não há entrega física nem código de rastreio. Quer ajuda para finalizar ou recuperar seu pedido?"
+        )
+    return None
 
 
 async def llm_reply(history: List[Dict[str, str]], ctx: Optional[Dict[str, Any]], hints: Optional[Dict[str, bool]]) -> str:
