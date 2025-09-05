@@ -4,7 +4,7 @@ Z-API + ChatGPT + CartPanda + Catálogo JSON
 Python 3.11+
 
 Requisitos no .env (Render → Environment):
-  OPENAI_API_KEY=sk-...
+  OPENAI_API_KEY=
   ASSISTANT_NAME=Iara
   BRAND_NAME=Paginatto
   SITE_URL=https://paginattoebooks.github.io/Paginatto.site.com.br/
@@ -88,9 +88,9 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Iara")
 BRAND_NAME = os.getenv("BRAND_NAME", "Paginatto")
-SITE_URL = os.getenv("SITE_URL", "")
+SITE_URL = os.getenv("SITE_URL", "https://paginattoebooks.github.io/Paginatto.site.com.br/")
 SUPPORT_URL = os.getenv("SUPPORT_URL", SITE_URL)
-CNPJ = os.getenv("CNPJ", "")
+CNPJ = os.getenv("CNPJ", "57.941.903/0001-94")
 
 SECURITY_BLURB = os.getenv(
     "SECURITY_BLURB",
@@ -380,7 +380,7 @@ SYSTEM_TEMPLATE = (
 
 
   # desistência/segurança/e-mail
-  "Se 'desisti' → pergunte o motivo. "
+  "Se desisti → pergunte o motivo. "
   "Se segurança → diga que checkout é HTTPS/PSP oficial e convide a ver {insta} e {site} se pedirem. "
   "Se não recebeu por e-mail → peça nº do pedido ou CPF/CNPJ para verificar; ofereça reenvio pelo e-mail, pergunte o e-mail cadastrado. "
 
