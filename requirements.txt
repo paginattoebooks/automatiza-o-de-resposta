@@ -4,3 +4,4 @@ httpx
 python-dotenv
 pydantic
 openai
+redis==5.0.1
