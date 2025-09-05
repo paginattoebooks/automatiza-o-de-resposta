@@ -61,6 +61,11 @@ SECURITY_BLURB = os.getenv(
     "Checkout com HTTPS e PSP oficial. Não pedimos senhas ou códigos."
 )
 
+DELIVERY_ONE_LINER = (
+  "Entrega 100% digital. Enviamos/liberamos o e-book por e-mail e WhatsApp após o pagamento. "
+  "Não pedimos endereço e não existe rastreio."
+)
+
 CHECKOUT_RESUME_BASE = os.getenv("CHECKOUT_RESUME_BASE", "")
 
 ZAPI_INSTANCE = os.getenv("ZAPI_INSTANCE", "")
@@ -199,6 +204,9 @@ def analyze_intent(text: str) -> dict:
         "support": has("suporte", "ajuda", "atendimento"),
         "delivery_question": has("entrega", "como recebo", "como chega", "onde chega", "forma de entrega", "prazo de entrega"),
         "tracking_request": has("codigo de rastreio", "código de rastreio", "rastreamento", "rastreio"),
+        "delivery": has("entrega","prazo","quando chega","chega quando","rastreio","rastreamento",
+        "código de rastreio","frete","transportadora","correios","cep","endereço","endereco"),
+
     }
 
 
@@ -297,17 +305,37 @@ def order_summary(ctx: Optional[Dict[str, Any]]) -> str:
     return " | ".join(parts)
 
 
-SYSTEM_TEMPLATE = """
-Saudação curta: '{greeting}, {name}. Como posso ajudar?' (sem nome: '{greeting}. Como posso ajudar?').
-Responda em até 2 frases (≤160 caracteres). Direto e humano.
-Entrega: 100% digital. Nunca fale de frete/rastreio. Se perguntarem, diga que o acesso é virtual por e-mail/WhatsApp e, se pedirem, passe {site}.
-Se 'não chegou' → peça nº do pedido; se não tiver, peça CPF/CNPJ. Diga que vai verificar no sistema.
-Se falta de saldo → ofereça até {maxdisc}% (pergunte se aceita).
-Se segurança → cite HTTPS/PSP oficial; passe {site} só se pedirem.
-Se pagamento travou → pergunte a etapa e ofereça link de retomada quando houver.
-Nunca peça senhas/códigos. Se houver DADOS_DO_PEDIDO, cite nº, status e link de retomada.
-Se reconhecer um produto foco, explique que é ebook digital e como recebe. Ofereça link.
-""".strip()
+SYSTEM_TEMPLATE = (
+  # estilo
+  "Saudação curta: '{greeting}, {name}! Como posso ajudar?' (sem nome: '{greeting}! Como posso ajudar?'). "
+  "Respostas curtas: 1–2 frases. Sem textão. "
+
+  # política de entrega (regra dura)
+  "Produto e entrega: 100% DIGITAL (e-book). Nunca fale de endereço, frete, correios, transportadora ou rastreio. "
+  "Se perguntarem por entrega, endereço, prazo, frete ou rastreio → responda apenas que é digital e enviada/ liberada "
+  "por e-mail/WhatsApp após pagamento, e ofereça checar status. "
+
+  # desistência/segurança/e-mail
+  "Se 'desisti' → pergunte o motivo. "
+  "Se segurança → diga que checkout é HTTPS/PSP oficial e convide a ver {insta} e {site} se pedirem. "
+  "Se não recebeu por e-mail → peça nº do pedido ou CPF/CNPJ para verificar; ofereça reenvio pelo e-mail, pergunte o e-mail cadastrado. "
+
+  # físico
+  "Se achou que era físico → avise que é e-book digital e cite benefícios. "
+
+  # pagamento travou
+  "Se pagamento travou → pergunte em que etapa e ofereça ajuda para finalizar o pagamento. "
+
+  # bônus instagram
+  "Se citar Instagram/engajamento → ofereça bônus após seguir e comentar 3 posts; peça @ para validar. "
+
+  # nunca
+  "Nunca peça senhas/códigos. Nunca prometa alterar preço automaticamente. "
+
+  NAO_CHEGOU = "Consigo verificar já. Me envia o nº do pedido ou CPF/CNPJ para eu checar aqui em nosso sistema?"
+
+)
+
 
 
 def system_prompt(extra_context: Optional[Dict[str, Any]], hints: Optional[Dict[str, bool]] = None) -> str:
@@ -414,6 +442,10 @@ async def zapi_receive(request: Request):
     if wants_site(text):
         await zapi_send_text(phone, f"Aqui: {SITE_URL}")
         return JSONResponse({"status": "sent", "shortcut": "site"})
+
+    # atalho: perguntas de entrega/endereço/rastreio → resposta curta e correta
+   if hints and hints.get("delivery"):
+      return DELIVERY_ONE_LINER
 
     prod = match_product(text)
     if prod and prod.get("checkout"):
