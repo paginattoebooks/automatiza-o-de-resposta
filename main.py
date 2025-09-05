@@ -585,27 +585,21 @@ async def zapi_send_text(phone: str, message: str) -> dict:
 async def zapi_receive(request: Request):
     data = await request.json()
 
-    # Extrair telefone e texto da mensagem
-    phone = (
-        data.get("phone") or data.get("from") or data.get("chatId")
-        or (data.get("contact", {}) or {}).get("phone")
-        or (data.get("message", {}) or {}).get("from")
-        or (data.get("messages", [{}])[0] or {}).get("from")
-        or ""
-    )
-    text = (
-        data.get("text") or data.get("body")
-        or (data.get("message") if isinstance(data.get("message"), str) else None)
-        or (data.get("message", {}) or {}).get("text")
-        or (data.get("messages", [{}])[0] or {}).get("text")
-        or (data.get("messages", [{}])[0] or {}).get("body")
-        or ""
-    )
+  phone = normalize_phone(str(phone))
+text = str(text).strip()
+if not phone or not text:
+    return JSONResponse({"status": "ignored", "reason": "missing phone or text"})
 
-    phone = normalize_phone(str(phone))
-    text = str(text).strip()
-    if not phone or not text:
-        return JSONResponse({"status": "ignored", "reason": "missing phone or text"})
+# -------- PRIORIDADE: produto citado => manda checkout e sai ----------
+prod = find_product_in_text(text)
+if prod:
+    await zapi_send_text(
+        phone,
+        f'Checkout do "{prod["name"]}": {prod["checkout"]}\nEntrega 100% digital.'
+    )
+    return JSONResponse({"status": "sent", "product": prod["name"]})
+# ---------------------------------------------------------------------
+
 
     # Verifica se a mensagem já foi processada (evita duplicados)
     msg_id = (
