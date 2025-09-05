@@ -37,6 +37,42 @@ from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 import httpx
 
+import json, re, os
+
+PROD_FILE = os.getenv("PRODUCTS_FILE", "produtos_paginatto.json")
+
+def _load_products():
+  try:
+    with open(PROD_FILE, "r", encoding="utf-8") as f:
+      items = json.load(f)
+  except Exception:
+    items = []
+  # normaliza e cria aliases
+  prods = []
+  for it in items:
+    name = it.get("name","").strip()
+    url  = it.get("checkout","").strip()
+    if not name or not url:
+      continue
+    nid = re.sub(r"[^a-z0-9]+"," ", name.lower()).strip()
+    aliases = {name.lower()}
+    # tabib volume N → gerar “tabib n”, “tabib vol n”, “tabib n”, “volume n”, “v n”
+    m = re.search(r"(tabib).*?(?:volume|vol)?\s*(\d+)", name.lower())
+    if m:
+      n = m.group(2)
+      aliases.update({
+        f"tabib {n}", f"tabib vol {n}", f"tabib volume {n}",
+        f"tabib{n}", f"volume {n}", f"v{n}", f"v {n}"
+      })
+    prods.append({
+      "name": name, "checkout": url,
+      "price": it.get("price"), "blurb": it.get("blurb"),
+      "aliases": list(aliases)
+    })
+  return prods
+
+PRODUCTS = _load_products()
+
 from datetime import datetime
 try:
     from zoneinfo import ZoneInfo
@@ -154,6 +190,27 @@ def load_products(path: str) -> Dict[str, Dict[str, str]]:
         out[key] = p
     return out
 
+def find_product_in_text(text: str):
+  t = (text or "").lower()
+  tnorm = re.sub(r"[^a-z0-9]+"," ", t)
+  best = None
+  for p in PRODUCTS:
+    # bate por alias
+    for a in p["aliases"]:
+      if a in t or a in tnorm:
+        best = p
+        break
+    if best: break
+  # fallback por nome parcial
+  if not best:
+    for p in PRODUCTS:
+      base = p["name"].lower()
+      if any(w in base for w in tnorm.split()):
+        if p["name"].lower().startswith("tabib") and "tabib" not in t:
+          continue
+        best = p
+        break
+  return best
 
 PRODUCTS = load_products(PRODUCTS_JSON_PATH)
 
@@ -206,6 +263,7 @@ def analyze_intent(text: str) -> dict:
         "tracking_request": has("codigo de rastreio", "código de rastreio", "rastreamento", "rastreio"),
         "delivery": has("entrega","prazo","quando chega","chega quando","rastreio","rastreamento",
         "código de rastreio","frete","transportadora","correios","cep","endereço","endereco"),
+    
 
     }
 
@@ -314,6 +372,12 @@ SYSTEM_TEMPLATE = (
   "Produto e entrega: 100% DIGITAL (e-book). Nunca fale de endereço, frete, correios, transportadora ou rastreio. "
   "Se perguntarem por entrega, endereço, prazo, frete ou rastreio → responda apenas que é digital e enviada/ liberada "
   "por e-mail/WhatsApp após pagamento, e ofereça checar status. "
+  "ENTREGA: 100% digital (ebook). NUNCA fale de frete, endereço, rastreio, Correios, transportadora.",
+  "Se perguntarem sobre entrega: responda curto → 'É digital. Você recebe por e-mail/área do pedido. Posso checar pelo nº do pedido ou CPF?'.",
+  "Cumprimento curto: 'bom dia/boa tarde, como posso ajudar?'. Nada de textão.",
+  "Se não pedirem link/site, não envie link algum.",
+  "Se perguntarem se chega na casa: diga que NÃO, pois é um ebook virtual.",
+
 
   # desistência/segurança/e-mail
   "Se 'desisti' → pergunte o motivo. "
@@ -428,6 +492,16 @@ async def zapi_receive(request: Request):
         or (data.get("messages", [{}])[0] or {}).get("body")
         or ""
     )
+     prod = find_product_in_text(text)
+if prod:
+  # resposta curta, direta, sem textão
+  price = f" – {prod['price']}" if prod.get("price") else ""
+  blurb = f"\n{prod['blurb']}" if prod.get("blurb") else ""
+  reply = f"{prod['name']}{price}\nCheckout: {prod['checkout']}{blurb}"
+  # envie pelo Z-API e retorne
+  await zapi_send_text(phone, reply)
+  return JSONResponse({"status":"ok","routed":"product_checkout"})
+
 
     phone = normalize_phone(str(phone))
     text = str(text).strip()
@@ -459,13 +533,25 @@ async def zapi_receive(request: Request):
     ctx = order_context_by_keys(phone, text)
     if ctx is None:
         ctx = await cartpanda_lookup(order_no=orderno_from_text(text), cpf=cpf_from_text(text))
-
-    hints = analyze_intent(text)
     if prod:
-        hints["product_id"] = _normalize(prod.get("name"))
-        hints["product"] = prod
+    # resposta curta e direta (sem textão e sem site)
+    price = f" • {prod.get('price')}" if prod.get("price") else ""
+    msg = f"{prod['name']}{price}\nCheckout: {prod['checkout']}"
+    await zapi_send_text(phone, msg)
+    return JSONResponse({"status": "ok", "handled": "product"})
 
-    try:
+  hints = analyze_intent(text)
+
+# Guardrail para entrega física
+  if hints.get("delivery_physical"):
+    reply = "É digital. Você recebe por e-mail/área do pedido. Posso checar pelo nº do pedido ou CPF?"
+  else:
+    reply = await llm_reply(convo, ctx, hints)
+
+    if not (hints and hints.get("site_request")):
+    txt = scrub_links(txt)
+
+   try:
         reply = await llm_reply(convo, ctx, hints)
     except Exception:
         reply = "Deu erro aqui. Quer que eu chame o time humano?"
