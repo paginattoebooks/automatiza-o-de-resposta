@@ -41,44 +41,43 @@ import json, os, re, unicodedata
 
 PRODUCTS_JSON_PATH = os.getenv("PRODUCTS_JSON_PATH", "produtos_paginatto.json")
 
-def _norm(s: str) -> str:
+def _normalize(s: str) -> str:
     s = (s or "").lower()
-    s = unicodedata.normalize("NFKD", s).encode("ascii","ignore").decode("ascii")
-    return re.sub(r"[^a-z0-9]+"," ", s).strip()
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", " ", s).strip()
 
-def _make_aliases(name: str) -> set[str]:
-    a = {_norm(name)}
-    m = re.search(r"(tabib).*?(?:volume|vol)?\s*(\d+)", name.lower())
-    if m:
-        n = m.group(2)
-        a |= {_norm(x) for x in [f"tabib {n}", f"tabib vol {n}", f"tabib volume {n}",
-                                 f"tabib{n}", f"volume {n}", f"v{n}", f"bibi {n}"]}
-    return a
-
-def load_products(path: str) -> list[dict]:
+def load_products(path: str) -> dict[str, dict[str, str]]:
     try:
         with open(path, "r", encoding="utf-8") as f:
-            items = json.load(f)
+            data = json.load(f)
     except Exception:
-        items = []
-    prods = []
-    for it in items:
+        data = []
+    out = {}
+    for it in data:
         name = (it.get("name") or "").strip()
-        checkout = (it.get("checkout") or "").strip()
-        if not name or not checkout:
+        if not name or not it.get("checkout"):
             continue
-        prods.append({"name": name, "checkout": checkout, "aliases": list(_make_aliases(name))})
-    return prods
+        p = {"name": name, "checkout": it["checkout"], "image": it.get("image","")}
+        aliases = {_normalize(name)}
+        m = re.search(r"(tabib).*(\d+)", name.lower())
+        if m:
+            n = m.group(2)
+            for pat in [f"tabib {n}", f"tabib volume {n}", f"tabib v {n}", f"tabib{n}", f"v{n}", f"volume {n}", f"bibi {n}"]:
+                aliases.add(_normalize(pat))
+        p["aliases"] = list(aliases)
+        out[_normalize(name)] = p
+    return out
 
 PRODUCTS = load_products(PRODUCTS_JSON_PATH)
 
 def find_product_in_text(text: str) -> dict | None:
-    q = _norm(text)
-    for p in PRODUCTS:
+    q = _normalize(text)
+    for p in PRODUCTS.values():
         for a in p.get("aliases", []):
             if a and a in q:
                 return p
     return None
+
 
 PRODUCTS = {
     "tabib1": {"name": "Tabib Volume 1: Tratamento de Dores e Inflamações",
@@ -161,8 +160,6 @@ MAX_DISCOUNT_PCT = int(os.getenv("MAX_DISCOUNT_PCT", "10"))
 INSTAGRAM_HANDLE = os.getenv("INSTAGRAM_HANDLE", "@Paginatto")
 INSTAGRAM_URL = os.getenv("INSTAGRAM_URL", "https://instagram.com/Paginatto")
 
-CARTPANDA_API_BASE = os.getenv("CARTPANDA_API_BASE", "")
-CARTPANDA_API_TOKEN = os.getenv("CARTPANDA_API_TOKEN", "")
 
 PRODUCTS_JSON_PATH = os.getenv("PRODUCTS_JSON_PATH", "produtos_paginatto.json")
 
@@ -172,6 +169,13 @@ if not (OPENAI_API_KEY and ZAPI_INSTANCE and ZAPI_TOKEN and ZAPI_CLIENT_TOKEN):
 OPENAI = OpenAI(api_key=OPENAI_API_KEY)
 
 app = FastAPI(title="Paginatto — Iara Bot")
+
+CONTINUE_KW = {"sim","quero continuar","continuar","retomar","seguir","finalizar","pagar","quero pagar","voltar ao carrinho"}
+
+def wants_resume(t: str) -> bool:
+    tl = (t or "").lower()
+    return any(k in tl for k in CONTINUE_KW)
+
 
 # --- Stores (trocar por Redis em produção) ---
 SESSIONS: Dict[str, List[Dict[str, str]]] = {}
@@ -448,34 +452,34 @@ SYSTEM_TEMPLATE = (
 
 
   # política de entrega (regra dura)
-  "Produto e entrega: 100% DIGITAL (e-book). Nunca fale de endereço, frete, correios, transportadora ou rastreio. "
-  "Se perguntarem por entrega, endereço, prazo, frete ou rastreio → responda apenas que é digital e enviada/ liberada "
+  "Produto e entrega: 100% DIGITAL (e-book). Nunca fale de endereço, frete, correios, transportadora ou rastreio.Nada de textão. "
+  "Se perguntarem por entrega, endereço, prazo, frete ou rastreio → responda apenas que é digital e enviada/ liberada. Nada de textão. "
   "por e-mail/WhatsApp após pagamento, e ofereça checar status. "
-  "ENTREGA: 100% digital (ebook). NUNCA fale de frete, endereço, rastreio, Correios, transportadora.",
+  "ENTREGA: 100% digital (ebook). NUNCA fale de frete, endereço, rastreio, CoNada de textão.rreios, transportadora.",
   "Se perguntarem sobre entrega: responda curto → 'É digital. Você recebe por e-mail/área do pedido. Posso checar pelo nº do pedido ou CPF?'.",
   "Cumprimento curto: 'bom dia/boa tarde, como posso ajudar?'. Nada de textão.",
-  "Se não pedirem link/site, não envie link algum.",
-  "Se perguntarem se chega na casa: diga que NÃO, pois é um ebook virtual.",
+  "Se não pedirem link/site, não envie link algum.",Nada de textão.
+  "Se perguntarem se chega na casa: diga que NÃO, pois é um ebook virtual.Nada de textão.",
 
 
   # desistência/segurança/e-mail
-  "Se desisti → pergunte o motivo. "
-  "Se segurança → diga que o checkout é HTTPS/PSP oficial; se e somente se pedirem site, ofereça {insta}."
-  "Se não recebeu por e-mail → peça nº do pedido ou CPF/CNPJ para verificar; ofereça reenvio pelo e-mail, pergunte o e-mail cadastrado. "
+  "Se desisti → pergunte o motivo.Nada de textão. "
+  "Se segurança → diga que o checkout é HTTPS/PSP oficial; se e somente se pedirem site, ofereça {insta}.Nada de textão."
+  "Se não recebeu por e-mail → peça nº do pedido ou CPF/CNPJ para verificar; ofereça reenvio pelo e-mail, pergunte o e-mail cadastrado. Nada de textão."
 
   # físico
-  "Se achou que era físico → avise que é e-book digital e cite benefícios. "
+  "Se achou que era físico → avise que é e-book digital e cite benefícios. Nada de textão."
 
   # pagamento travou
-  "Se pagamento travou → pergunte em que etapa e ofereça ajuda para finalizar o pagamento. "
+  "Se pagamento travou → pergunte em que etapa e ofereça ajuda para finalizar o pagamento.Nada de textão. "
 
   # bônus instagram
-  "Se citar Instagram/engajamento → ofereça bônus após seguir e comentar 3 posts; peça @ para validar. "
+  "Se citar Instagram/engajamento → ofereça bônus após seguir e comentar 3 posts; peça @ para validar. Nada de textão. "
 
   # nunca
-  "Nunca peça senhas/códigos. Nunca prometa alterar preço automaticamente. "
+  "Nunca peça senhas/códigos. Nunca prometa alterar preço automaticamente. Nada de textão."
 
-  NAO_CHEGOU = "Consigo verificar já. Me envia o nº do pedido ou CPF/CNPJ para eu checar aqui em nosso sistema?"
+  NAO_CHEGOU = "Consigo verificar já. Me envia o nº do pedido ou CPF/CNPJ para eu checar aqui em nosso sistema?Nada de textão."
 
 )
 
@@ -508,31 +512,33 @@ from typing import Optional
 
 def quick_routes(t: str) -> Optional[str]:
     tl = (t or "").lower()
-    entrega_kw = [
-        "entrega", "entregam", "envio", "enviam", "frete", "chega", "chegar",
-        "chegou", "prazo", "rastreio", "rastreamento", "código de rastreio",
-        "endereco", "endereço"
-    ]
-    if any(k in tl for k in entrega_kw):
-        return (
-            "Nosso produto é 100% digital. Você recebe o acesso por e-mail e WhatsApp logo após o pagamento. "
-            "Não há entrega física nem código de rastreio. Quer ajuda para finalizar ou recuperar seu pedido?"
-        )
+    if any(k in tl for k in ["entrega","frete","chega","prazo","rastreio","rastreamento","correios","transportadora","endereco","endereço"]):
+        return "É digital. Você recebe por e-mail/WhatsApp após o pagamento. Quer ajuda para finalizar?"
+    if "fisico" in tl or "físico" in tl:
+        return "Não é físico. É e-book digital com acesso imediato após o pagamento."
     return None
 
 
-async def llm_reply(history: List[Dict[str, str]], ctx: Optional[Dict[str, Any]], hints: Optional[Dict[str, bool]]) -> str:
+
+async def llm_reply(history, ctx, hints):
     msgs = [{"role": "system", "content": system_prompt(ctx, hints)}]
     if ctx:
-        msgs.append({"role": "assistant", "content": f"DADOS_DO_PEDIDO: {order_summary(ctx)}"})
-    msgs += history[-30:]
+        msgs.append({"role":"assistant","content":f"DADOS_DO_PEDIDO: {order_summary(ctx)}"})
+    msgs += history[-20:]
 
     resp = OPENAI.chat.completions.create(
         model="gpt-4o-mini",
-        temperature=0.3,
+        temperature=0.2,
+        max_tokens=120,  # curto por padrão
         messages=msgs,
     )
-    txt = resp.choices[0].message.content.strip()
+    txt = (resp.choices[0].message.content or "").strip()
+    # fallback para casos típicos
+    if any(k in (history[-1]["content"].lower()) for k in ["nao chegou","não chegou","nao recebi","não recebi"]):
+        if not ctx:
+            txt = "Me envia o nº do pedido ou CPF/CNPJ para eu verificar agora."
+    return _clip(txt)
+
 
     # Fallback curto para falta de contexto em "não chegou"
     if not ctx and any(x in txt.lower() for x in ["nao chegou", "não chegou", "nao recebi", "não recebi", "acesso", "nao consigo", "não consigo"]):
@@ -542,16 +548,12 @@ async def llm_reply(history: List[Dict[str, str]], ctx: Optional[Dict[str, Any]]
         return "Me passa o nº do pedido ou CPF/CNPJ para eu localizar. Posso falar com o time humano se preferir."
     return txt
 
-    SITE_DOMS = ("paginattoebooks.github.io", "paginatto.site", "paginatto.site.com.br")
+   SITE_DOMS = ("paginattoebooks.github.io", "paginatto.site", "paginatto.site.com.br")
 
 def scrub_links_if_not_requested(user_text: str, reply: str) -> str:
-    if "site" in user_text.lower():
+    if "site" in (user_text or "").lower() or "link" in (user_text or "").lower():
         return reply
-    for d in SITE_DOMS:
-        reply = re.sub(rf"https?://[^\s]*{re.escape(d)}[^\s]*", "", reply)
-    return reply.strip()
-
-
+    return re.sub(r"https?://\S+", "", reply).strip()
 
 # --- Webhooks ---
 @app.get("/health")
@@ -569,45 +571,63 @@ async def zapi_send_text(phone: str, message: str) -> dict:
             raise HTTPException(status_code=502, detail={"zapi_error": data})
         return data
 
-
 @app.post("/webhook/zapi/receive")
 async def zapi_receive(request: Request):
     data = await request.json()
+    msg = (data.get("message") or data.get("body") or data.get("text") or "")
+    phone = normalize_phone(data.get("phone") or (data.get("sender") or {}).get("phone") or "")
+    if not phone or not msg:
+        return JSONResponse({"status":"ignored","reason":"missing phone or text"})
 
-  phone = normalize_phone(str(phone))
-text = str(text).strip()
-if not phone or not text:
-    return JSONResponse({"status": "ignored", "reason": "missing phone or text"})
-
-# -------- PRIORIDADE: produto citado => manda checkout e sai ----------
-prod = find_product_in_text(text)
-if prod:
-    msg = f'Checkout do "{prod["name"]}": {prod["checkout"]}\nEntrega 100% digital.'
-    await zapi_send_text(phone, msg)
-    return JSONResponse({"status": "sent", "product": prod["name"]})
-# ---------------------------------------------------------------------
+  if wants_resume(msg):
+    ctx = order_context_by_keys(phone, msg)   # **não** faz lookup externo
+    if ctx and (ctx.get("resume_link") or ctx.get("checkout_url")):
+        link = ctx.get("resume_link") or ctx.get("checkout_url")
+        await zapi_send_text(phone, f"Perfeito. Seu checkout: {link}")
+        return JSONResponse({"status":"sent","route":"resume","order_no":ctx.get("order_no")})
+    await zapi_send_text(phone, "Me envia nº do pedido ou CPF para puxar seu checkout.")
+    return JSONResponse({"status":"need_id"})
 
 
-    # Verifica se a mensagem já foi processada (evita duplicados)
-    msg_id = (
-        data.get("messageId") or data.get("id") or data.get("message", {}).get("id") or (data.get("messages", [{}])[0] or {}).get("id")
-    )
-    if msg_id and msg_id in SEEN_IDS:
-        return JSONResponse({"status": "duplicate_ignored"})
+  # idempotência
+    msg_id = data.get("messageId") or data.get("id") or (data.get("message") or {}).get("id")
     if msg_id:
+        if msg_id in SEEN_IDS:
+            return JSONResponse({"status":"duplicate"})
         SEEN_IDS.add(msg_id)
 
-    # Busca produto no texto
-   ```
-prod = find_product_in_text(text)
-if prod:
-    price = f" – {prod['price']}" if prod.get("price") else ""
-    blurb = f"\n{prod['blurb']}" if prod.get("blurb") else ""
-    reply = f"{prod["name"]}{price}\nCheckout: {prod["checkout"]}{blurb}"
-    await zapi_send_text(phone, reply)
-    return JSONResponse({"status":"ok","routed":"product_checkout"})
-```
-    # ... resto do código do webhook ...
+    # 1) resposta curta de entrega/físico
+    qr = quick_routes(msg)
+    if qr:
+        await zapi_send_text(phone, qr)
+        return JSONResponse({"status":"sent","route":"quick"})
+
+    # 2) se citar produto → manda checkout e encerra
+    prod = find_product_in_text(msg)
+    if prod:
+        reply = f'{prod["name"]}\nCheckout: {prod["checkout"]}\nEntrega 100% digital.'
+        await zapi_send_text(phone, reply)
+        return JSONResponse({"status":"sent","route":"product","product":prod["name"]})
+
+    # 3) saudação curta default
+    history = SESSIONS.setdefault(phone, [])
+    history.append({"role":"user","content":msg})
+
+    ctx = order_context_by_keys(phone, msg)  # opcional
+    hints = {}
+    ai = await llm_reply(history, ctx, hints)
+    ai = scrub_links_if_not_requested(msg, ai)
+
+    # força saudação minimal se for primeira interação
+    if len(history) <= 1 and len(ai) > 0 and not prod and not qr:
+        g = br_greeting()
+        # se detectar pergunta genérica tipo "ola", responda curto
+        if _normalize(msg) in {"oi","ola","olá","bom dia","boa tarde","boa noite","oii","oie"}:
+            ai = f"{g}! Como posso ajudar?"
+
+    await zapi_send_text(phone, ai)
+    history.append({"role":"assistant","content":ai})
+    return JSONResponse({"status":"sent","route":"llm"})
 
 
 @app.post("/webhook/zapi/status")
@@ -621,23 +641,22 @@ async def cartpanda_order(request: Request):
     data = await request.json()
     d = data.get("data") or data
 
-    order_no = str(d.get("order_no") or d.get("number") or d.get("id") or d.get("orderNumber") or "").strip()
     customer = d.get("customer") or {}
+    order_no = str(d.get("order_no") or d.get("number") or d.get("id") or d.get("orderNumber") or "").strip()
+
     email = (customer.get("email") or d.get("email") or "").strip().lower()
     phone = normalize_phone(customer.get("phone") or d.get("phone") or "")
     cpf = digits_only(customer.get("document") or d.get("document") or d.get("cpf") or "")
+
     payment_status = (d.get("payment_status") or d.get("status") or "").strip().lower()
     cart_token = d.get("cart_token") or d.get("cartToken") or ""
     checkout_url = d.get("checkout_url") or d.get("checkoutUrl") or ""
 
-    if not order_no:
-        return JSONResponse({"indexed": False, "reason": "missing order_no"})
-
     ctx = {
-        "order_no": order_no,
-        "payment_status": payment_status,
-        "checkout_url": checkout_url,
-        "cart_token": cart_token,
+        "order_no": order_no or None,
+        "payment_status": payment_status or None,
+        "checkout_url": checkout_url or None,
+        "cart_token": cart_token or None,
         "customer": {
             "name": customer.get("name") or d.get("name") or "",
             "email": email,
@@ -648,16 +667,17 @@ async def cartpanda_order(request: Request):
     if cart_token and CHECKOUT_RESUME_BASE:
         ctx["resume_link"] = f"{CHECKOUT_RESUME_BASE}{cart_token}"
 
-    ORDERS_BY_NO[order_no] = ctx
+    # Indexações locais
+    if order_no:
+        ORDERS_BY_NO[order_no] = ctx
     if cpf:
-        ORDERS_BY_CPF.setdefault(cpf, []).append(order_no)
+        ORDERS_BY_CPF.setdefault(cpf, []).append(order_no or "")
     if email:
-        ORDERS_BY_EMAIL.setdefault(email, []).append(order_no)
+        ORDERS_BY_EMAIL.setdefault(email, []).append(order_no or "")
     if phone:
-        LAST_ORDER_BY_PHONE[phone] = order_no
+        LAST_ORDER_BY_PHONE[phone] = order_no or (cart_token or "")
 
-    return JSONResponse({"indexed": True, "order_no": order_no})
-
+    return JSONResponse({"indexed": True, "order_no": order_no, "has_resume": bool(ctx.get("resume_link") or checkout_url)})
 
 @app.post("/webhook/cartpanda/support")
 async def cartpanda_support(request: Request):
