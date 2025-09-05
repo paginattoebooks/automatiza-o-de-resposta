@@ -301,11 +301,11 @@ def br_greeting() -> str:
         h = datetime.now(ZoneInfo("America/Sao_Paulo")).hour if ZoneInfo else datetime.utcnow().hour
     except Exception:
         h = datetime.utcnow().hour
-    if 5 <= h < 12:
+    if 5 <= h < 11*59:
         return "Bom dia"
-    if 12 <= h < 18:
+    if 12 <= h < 17*59
         return "Boa tarde"
-    if 18 <= h < 4:
+    if 18 <= h < 4*59
         return "Boa noite"
 
 
@@ -551,6 +551,14 @@ async def zapi_send_text(phone: str, message: str) -> dict:
 @app.post("/webhook/zapi/receive")
 async def zapi_receive(request: Request):
     data = await request.json()
+
+  # 1º: produto pedido? manda o checkout direto (resposta curta)
+prod = find_product_in_text(text)
+if prod:
+    msg = f'Checkout do "{prod["name"]}": {prod["checkout"]}\nEntrega 100% digital.'
+    await zapi_send_text(phone, msg)
+    return JSONResponse({"status": "ok", "product": prod["name"]})
+
 
     msg_id = (
         data.get("messageId") or data.get("id") or data.get("message", {}).get("id") or (data.get("messages", [{}])[0] or {}).get("id")
