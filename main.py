@@ -43,18 +43,16 @@ PRODUCTS_JSON_PATH = os.getenv("PRODUCTS_JSON_PATH", "produtos_paginatto.json")
 
 def _norm(s: str) -> str:
     s = (s or "").lower()
-    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
-    return re.sub(r"[^a-z0-9]+", " ", s).strip()
+    s = unicodedata.normalize("NFKD", s).encode("ascii","ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+"," ", s).strip()
 
 def _make_aliases(name: str) -> set[str]:
     a = {_norm(name)}
     m = re.search(r"(tabib).*?(?:volume|vol)?\s*(\d+)", name.lower())
     if m:
         n = m.group(2)
-        a |= {_norm(x) for x in [
-            f"tabib {n}", f"tabib vol {n}", f"tabib volume {n}",
-            f"tabib{n}", f"volume {n}", f"v{n}", f"bibi {n}"
-        ]}
+        a |= {_norm(x) for x in [f"tabib {n}", f"tabib vol {n}", f"tabib volume {n}",
+                                 f"tabib{n}", f"volume {n}", f"v{n}", f"bibi {n}"]}
     return a
 
 def load_products(path: str) -> list[dict]:
@@ -69,11 +67,7 @@ def load_products(path: str) -> list[dict]:
         checkout = (it.get("checkout") or "").strip()
         if not name or not checkout:
             continue
-        prods.append({
-            "name": name,
-            "checkout": checkout,
-            "aliases": list(_make_aliases(name)),
-        })
+        prods.append({"name": name, "checkout": checkout, "aliases": list(_make_aliases(name))})
     return prods
 
 PRODUCTS = load_products(PRODUCTS_JSON_PATH)
@@ -81,16 +75,11 @@ PRODUCTS = load_products(PRODUCTS_JSON_PATH)
 def find_product_in_text(text: str) -> dict | None:
     q = _norm(text)
     for p in PRODUCTS:
-        for a in p["aliases"]:
+        for a in p.get("aliases", []):
             if a and a in q:
                 return p
-    # fallback: nome parcialmente contido
-    for p in PRODUCTS:
-        if _norm(p["name"]) in q or any(w in q for w in _norm(p["name"]).split()):
-            return p
     return None
 
-# --- Catálogo embutido (sem arquivo externo) ---
 PRODUCTS = {
     "tabib1": {"name": "Tabib Volume 1: Tratamento de Dores e Inflamações",
                "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919679:1"},
@@ -593,10 +582,8 @@ if not phone or not text:
 # -------- PRIORIDADE: produto citado => manda checkout e sai ----------
 prod = find_product_in_text(text)
 if prod:
-    await zapi_send_text(
-        phone,
-        f'Checkout do "{prod["name"]}": {prod["checkout"]}\nEntrega 100% digital.'
-    )
+    msg = f'Checkout do "{prod["name"]}": {prod["checkout"]}\nEntrega 100% digital.'
+    await zapi_send_text(phone, msg)
     return JSONResponse({"status": "sent", "product": prod["name"]})
 # ---------------------------------------------------------------------
 
