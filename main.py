@@ -257,27 +257,29 @@ def load_products(path: str) -> Dict[str, Dict[str, str]]:
         out[key] = p
     return out
 
-def find_product_in_text(text: str):
-  t = (text or "").lower()
-  tnorm = re.sub(r"[^a-z0-9]+"," ", t)
-  best = None
-  for p in PRODUCTS:
-    # bate por alias
-    for a in p["aliases"]:
-      if a in t or a in tnorm:
-        best = p
-        break
-    if best: break
-  # fallback por nome parcial
-  if not best:
-    for p in PRODUCTS:
-      base = p["name"].lower()
-      if any(w in base for w in tnorm.split()):
-        if p["name"].lower().startswith("tabib") and "tabib" not in t:
-          continue
-        best = p
-        break
-  return best
+def _normalize(s: str) -> str:
+    s = (s or "").lower()
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", " ", s).strip()
+
+def match_product(text: str) -> Optional[Dict[str, str]]:
+    q = _normalize(text)
+    # 1) prioridade: "tabib" + número
+    if "tabib" in q or "bibi" in q:
+        for n, key in ((" 4", "tabib4"), (" 3", "tabib3"), (" 2", "tabib2"), (" 1", "tabib1")):
+            if n in f" {q} ":
+                return PRODUCTS.get(key)
+    # 2) varre aliases
+    for pid, aliases in PROD_ALIASES.items():
+        for a in aliases:
+            if _normalize(a) in q:
+                return PRODUCTS.get(pid)
+    # 3) fallback: trecho do nome
+    for _, p in PRODUCTS.items():
+        if _normalize(p.get("name","")) and any(w for w in q.split() if w and w in _normalize(p["name"])):
+            return p
+    return None
+
 
 PRODUCTS = load_products(PRODUCTS_JSON_PATH)
 
@@ -301,13 +303,11 @@ def br_greeting() -> str:
         h = datetime.now(ZoneInfo("America/Sao_Paulo")).hour if ZoneInfo else datetime.utcnow().hour
     except Exception:
         h = datetime.utcnow().hour
-    if 5 <= h < 11*59:
+    if 5 <= h < 12:
         return "Bom dia"
-    if 12 <= h < 17*59
+    if 12 <= h < 18:
         return "Boa tarde"
-    if 18 <= h < 4*59
-        return "Boa noite"
-
+    return "Boa noite"
 
 def first_name(v: Optional[str]) -> str:
     n = (v or "").strip()
@@ -434,6 +434,10 @@ SYSTEM_TEMPLATE = (
   # estilo
   "Saudação curta: '{greeting}, {name}! Como posso ajudar?' (sem nome: '{greeting}! Como posso ajudar?'). "
   "Respostas curtas: 1–2 frases. Sem textão. "
+  "Se pedirem produto específico → responda só com checkout direto."
+  "Se não pedirem link/site, não envie link algum."
+  "Entrega 100% digital. Nunca fale de endereço/frete/correios/rastreio."
+
 
   # política de entrega (regra dura)
   "Produto e entrega: 100% DIGITAL (e-book). Nunca fale de endereço, frete, correios, transportadora ou rastreio. "
@@ -448,7 +452,7 @@ SYSTEM_TEMPLATE = (
 
   # desistência/segurança/e-mail
   "Se desisti → pergunte o motivo. "
-  "Se segurança → diga que checkout é HTTPS/PSP oficial e convide a ver {insta} e {site} se pedirem. "
+  "Se segurança → diga que o checkout é HTTPS/PSP oficial; se e somente se pedirem site, ofereça {insta}."
   "Se não recebeu por e-mail → peça nº do pedido ou CPF/CNPJ para verificar; ofereça reenvio pelo e-mail, pergunte o e-mail cadastrado. "
 
   # físico
@@ -530,6 +534,16 @@ async def llm_reply(history: List[Dict[str, str]], ctx: Optional[Dict[str, Any]]
         return "Me passa o nº do pedido ou CPF/CNPJ para eu localizar. Posso falar com o time humano se preferir."
     return txt
 
+    SITE_DOMS = ("paginattoebooks.github.io", "paginatto.site", "paginatto.site.com.br")
+
+def scrub_links_if_not_requested(user_text: str, reply: str) -> str:
+    if "site" in user_text.lower():
+        return reply
+    for d in SITE_DOMS:
+        reply = re.sub(rf"https?://[^\s]*{re.escape(d)}[^\s]*", "", reply)
+    return reply.strip()
+
+
 
 # --- Webhooks ---
 @app.get("/health")
@@ -552,113 +566,77 @@ async def zapi_send_text(phone: str, message: str) -> dict:
 async def zapi_receive(request: Request):
     data = await request.json()
 
-  # 1º: produto pedido? manda o checkout direto (resposta curta)
-prod = find_product_in_text(text)
-if prod:
-    msg = f'Checkout do "{prod["name"]}": {prod["checkout"]}\nEntrega 100% digital.'
-    await zapi_send_text(phone, msg)
-    return JSONResponse({"status": "ok", "product": prod["name"]})
-
-
+    # de-dup
     msg_id = (
-        data.get("messageId") or data.get("id") or data.get("message", {}).get("id") or (data.get("messages", [{}])[0] or {}).get("id")
+        data.get("messageId") or data.get("id")
+        or (data.get("message", {}) or {}).get("id")
+        or (data.get("messages", [{}])[0] or {}).get("id")
     )
     if msg_id and msg_id in SEEN_IDS:
         return JSONResponse({"status": "duplicate_ignored"})
     if msg_id:
         SEEN_IDS.add(msg_id)
 
+    # origem e texto
     phone = (
         data.get("phone") or data.get("from") or data.get("chatId")
         or (data.get("contact", {}) or {}).get("phone")
         or (data.get("message", {}) or {}).get("from")
-        or (data.get("messages", [{}])[0] or {}).get("from")
-        or ""
+        or (data.get("messages", [{}])[0] or {}).get("from") or ""
     )
     text = (
         data.get("text") or data.get("body")
         or (data.get("message") if isinstance(data.get("message"), str) else None)
         or (data.get("message", {}) or {}).get("text")
         or (data.get("messages", [{}])[0] or {}).get("text")
-        or (data.get("messages", [{}])[0] or {}).get("body")
-        or ""
+        or (data.get("messages", [{}])[0] or {}).get("body") or ""
     )
-     prod = find_product_in_text(text)
-if prod:
-  # resposta curta, direta, sem textão
-  price = f" – {prod['price']}" if prod.get("price") else ""
-  blurb = f"\n{prod['blurb']}" if prod.get("blurb") else ""
-  reply = f"{prod['name']}{price}\nCheckout: {prod['checkout']}{blurb}"
-  # envie pelo Z-API e retorne
-  await zapi_send_text(phone, reply)
-  return JSONResponse({"status":"ok","routed":"product_checkout"})
-
 
     phone = normalize_phone(str(phone))
     text = str(text).strip()
     if not phone or not text:
         return JSONResponse({"status": "ignored", "reason": "missing phone or text"})
 
-    # Atalhos antes do LLM
+    # handoff humano
     if "humano" in text.lower():
         await zapi_send_text(phone, "Te passo pro time agora.")
         return JSONResponse({"status": "sent", "handoff": True})
-      
-   # 1º: produto pedido? manda o checkout direto (resposta curta)
-  prod = find_product_in_text(text)
-   if prod:
-    msg = f'Checkout do "{prod["name"]}": {prod["checkout"]}\nEntrega 100% digital.'
-    await zapi_send_text(phone, msg)
-    return JSONResponse({"status": "ok", "product": prod["name"]})
 
-   # atalho: perguntas de entrega/endereço/rastreio → resposta curta e correta
-   if hints and hints.get("delivery"):
-      return DELIVERY_ONE_LINER
-
+    # 1) SE PEDIR PRODUTO → MANDA CHECKOUT DIRETO (sem LLM)
     prod = match_product(text)
     if prod and prod.get("checkout"):
-        await zapi_send_text(phone, f"Link direto: {prod['checkout']}")
-        return JSONResponse({"status": "sent", "product": prod["name"]})
+        msg = f'Checkout do "{prod["name"]}": {prod["checkout"]}\nEntrega 100% digital.'
+        await zapi_send_text(phone, msg)
+        return JSONResponse({"status": "ok", "product": prod["name"]})
 
-    # Conversa normal
+    # 2) atalhos de entrega (sempre curto e sem site)
+    tl = text.lower()
+    entrega_kw = ["entrega","entregam","envio","frete","chega","chegar","prazo","rastreio","rastreamento","endereco","endereço"]
+    if any(k in tl for k in entrega_kw):
+        await zapi_send_text(
+            phone,
+            "É 100% digital. Você recebe por e-mail/WhatsApp após o pagamento. Posso te ajudar a finalizar?"
+        )
+        return JSONResponse({"status": "ok", "routed": "delivery"})
+
+    # 3) conversa normal (LLM), mas sem empurrar site
     convo = SESSIONS.setdefault(phone, [])
     convo.append({"role": "user", "content": text})
 
     ctx = order_context_by_keys(phone, text)
     if ctx is None:
         ctx = await cartpanda_lookup(order_no=orderno_from_text(text), cpf=cpf_from_text(text))
-    if prod:
-    # resposta curta e direta (sem textão e sem site)
-    price = f" • {prod.get('price')}" if prod.get("price") else ""
-    msg = f"{prod['name']}{price}\nCheckout: {prod['checkout']}"
-    await zapi_send_text(phone, msg)
-    return JSONResponse({"status": "ok", "handled": "product"})
 
-  hints = analyze_intent(text)
+    hints = analyze_intent(text)
 
-# Guardrail para entrega física
-  if hints.get("delivery_physical"):
-    reply = "É digital. Você recebe por e-mail/área do pedido. Posso checar pelo nº do pedido ou CPF?"
-  else:
-    reply = await llm_reply(convo, ctx, hints)
-
-    if not (hints and hints.get("site_request")):
-    txt = scrub_links(txt)
-
-   try:
+    try:
         reply = await llm_reply(convo, ctx, hints)
     except Exception:
         reply = "Deu erro aqui. Quer que eu chame o time humano?"
 
     convo.append({"role": "assistant", "content": reply})
-
-    try:
-        out = await zapi_send_text(phone, reply)
-    except HTTPException as ex:
-        return JSONResponse({"status": "sent_error", "detail": ex.detail})
-
+    out = await zapi_send_text(phone, reply)
     return JSONResponse({"status": "sent", "zapi": out})
-
 
 @app.post("/webhook/zapi/status")
 async def zapi_status(request: Request):
