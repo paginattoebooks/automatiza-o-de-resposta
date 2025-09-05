@@ -603,12 +603,15 @@ if prod:
     if "humano" in text.lower():
         await zapi_send_text(phone, "Te passo pro time agora.")
         return JSONResponse({"status": "sent", "handoff": True})
+      
+   # 1º: produto pedido? manda o checkout direto (resposta curta)
+  prod = find_product_in_text(text)
+   if prod:
+    msg = f'Checkout do "{prod["name"]}": {prod["checkout"]}\nEntrega 100% digital.'
+    await zapi_send_text(phone, msg)
+    return JSONResponse({"status": "ok", "product": prod["name"]})
 
-    if wants_site(text):
-        await zapi_send_text(phone, f"Aqui: {SITE_URL}")
-        return JSONResponse({"status": "sent", "shortcut": "site"})
-
-    # atalho: perguntas de entrega/endereço/rastreio → resposta curta e correta
+   # atalho: perguntas de entrega/endereço/rastreio → resposta curta e correta
    if hints and hints.get("delivery"):
       return DELIVERY_ONE_LINER
 
