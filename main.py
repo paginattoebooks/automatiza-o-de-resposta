@@ -9,22 +9,18 @@ Requisitos no .env (Render → Environment):
   BRAND_NAME=Paginatto
   SITE_URL=https://paginattoebooks.github.io/Paginatto.site.com.br/
   SUPPORT_URL=https://paginattoebooks.github.io/Paginatto.site.com.br/
-  CNPJ=...
+  CNPJ=57.941.903/0001-94
   SECURITY_BLURB=Checkout com HTTPS, PSP oficial. Não pedimos senhas/códigos.
   CHECKOUT_RESUME_BASE=https://seu-checkout.cartpanda.com/resume/
 
-  ZAPI_INSTANCE=...
-  ZAPI_TOKEN=...
-  ZAPI_CLIENT_TOKEN=...
+  ZAPI_INSTANCE=3E2D08AA912D5063906206E9A5181015
+  ZAPI_TOKEN=45351C39E4EDCB47C2466177
+  ZAPI_CLIENT_TOKEN=F8d6942e55c57407e95c2ceae481f6a92S
   SEND_TEXT_PATH=/send-text
 
   MAX_DISCOUNT_PCT=10
   INSTAGRAM_HANDLE=@Paginatto
   INSTAGRAM_URL=https://instagram.com/Paginatto
-
-  # Opcional
-  CARTPANDA_API_BASE=
-  CARTPANDA_API_TOKEN=
 
   # Catálogo
   PRODUCTS_JSON_PATH=produtos_paginatto.json
@@ -180,7 +176,8 @@ def br_greeting() -> str:
         return "Bom dia"
     if 12 <= h < 18:
         return "Boa tarde"
-    return "Boa noite"
+    if 18:01 <= h < 4:59
+        return "Boa noite"
 
 
 def first_name(v: Optional[str]) -> str:
