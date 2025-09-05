@@ -73,6 +73,7 @@ Arquivo: main.py
 import os
 import re
 import json
+import unicodedata, json
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, Request, HTTPException
@@ -98,6 +99,8 @@ BRAND_NAME = os.getenv("BRAND_NAME", "Paginatto")
 SITE_URL = os.getenv("SITE_URL", "")
 SUPPORT_URL = os.getenv("SUPPORT_URL", SITE_URL)
 CNPJ = os.getenv("CNPJ", "")
+PRODUCTS_JSON_PATH = os.getenv("PRODUCTS_JSON_PATH", "produtos_paginatto.json")
+
 
 SECURITY_BLURB = os.getenv(
     "SECURITY_BLURB",
@@ -162,7 +165,45 @@ def detect_product(text: str) -> Optional[str]:
 
 def parse_bool(x: Any) -> bool:
     return str(x).lower() in {"1", "true", "yes"}
+  
+def _normalize(s: str) -> str:
+    s = (s or "").lower()
+    s = unicodedata.normalize("NFKD", s).encode("ascii","ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", " ", s).strip()
 
+def load_products(path: str) -> Dict[str, Dict[str, str]]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    out: Dict[str, Dict[str, str]] = {}
+    for item in data:
+        name = (item.get("name") or "").strip()
+        if not name: 
+            continue
+        key = _normalize(name)
+        p = {"name": name, "checkout": item.get("checkout") or "", "image": item.get("image") or ""}
+        # aliases básicos: ex. tabib volume 4, tabib v4, tabib 4
+        aliases = {_normalize(name)}
+        m = re.search(r"(tabib).*(\\d+)", name.lower())
+        if m:
+            vol = m.group(2)
+            for pat in [f"tabib volume {vol}", f"tabib v {vol}", f"tabib {vol}"]:
+                aliases.add(_normalize(pat))
+        p["aliases"] = list(aliases)
+        out[key] = p
+    return out
+
+PRODUCTS = load_products(PRODUCTS_JSON_PATH)
+
+def match_product(text: str) -> Optional[Dict[str,str]]:
+    q = _normalize(text)
+    for _, p in PRODUCTS.items():
+        for a in p.get("aliases", []):
+            if a and a in q:
+                return p
+    return None
 
 async def zapi_send_text(phone: str, message: str) -> dict:
     url = f"{ZAPI_BASE}{SEND_TEXT_PATH}"
@@ -294,8 +335,12 @@ def analyze_intent(text: str) -> dict:
         "payment_problem": has("não consegui pagar","nao consegui pagar","pagamento","pix","boleto","cartão","cartao","checkout"),
         "instagram_bonus": has("instagram","comentar","comente","siga","seguir","post"),
         "support": has("suporte","ajuda","atendimento"),
-      
-      def order_summary(ctx: Optional[Dict[str, Any]]) -> str:
+
+  def wants_site(text: str) -> bool:
+    t = (text or "").lower()
+    return "site" in t or "paginatto.site" in t or "paginatto" in t and "site" in t
+
+  def order_summary(ctx: Optional[Dict[str, Any]]) -> str:
     if not ctx:
         return ""
     parts = []
@@ -451,6 +496,21 @@ async def zapi_receive(request: Request):
     text = str(text).strip()
     if not phone or not text:
         return JSONResponse({"status": "ignored", "reason": "missing phone or text"})
+ # 0) handoff humano por palavra-chave
+    if "humano" in text.lower():
+    await zapi_send_text(phone, "Te passo pro time agora.")
+    return JSONResponse({"status":"sent","handoff":True})
+
+  # 1) se pedir o site, envia site e sai
+   if wants_site(text):
+    await zapi_send_text(phone, f"Aqui: {SITE_URL}")
+    return JSONResponse({"status":"sent","shortcut":"site"})
+
+  # 2) se pedir um produto específico, envia checkout direto e sai
+    prod = match_product(text)
+    if prod and prod.get("checkout"):
+    await zapi_send_text(phone, f"Link direto: {prod['checkout']}")
+    return JSONResponse({"status":"sent","product":prod["name"]})
 
     convo = SESSIONS.setdefault(phone, [])
     convo.append({"role": "user", "content": text})
