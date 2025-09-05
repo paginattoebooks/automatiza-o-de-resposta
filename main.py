@@ -284,6 +284,8 @@ def analyze_intent(text: str) -> dict:
     t = (text or "").lower()
     has = lambda *xs: any(x in t for x in xs)
     return {
+        "delivery_question": has("entrega", "como recebo", "como chega", "onde chega", "forma de entrega", "prazo de entrega"),
+        "tracking_request": has("código de rastreio", "rastreamento", "rastreio", "código de rastreamento"),
         "ask_why_desist": has("desisti","desist"),
         "low_balance": has("sem saldo","falta de saldo","sem limite","cartão sem limite","cartao sem limite","saldo"),
         "security": has("seguran","golpe","fraude","medo"),
@@ -311,7 +313,9 @@ def analyze_intent(text: str) -> dict:
 # ----- Prompt do sistema -----
 SYSTEM_TEMPLATE = """
 Comece com '{greeting}, {name}! Tudo bem?' (sem nome: '{greeting}! Tudo bem?').
+Entrega: 100% digital. Nunca prometa rastreio/frete/envio físico. Se perguntarem, diga que o acesso é virtual por e-mail/WhatsApp após confirmação e convide a conferir em {site}.
 Respostas curtas: até 2 frases e 160 caracteres. Sem textão.
+Se 'não chegou' → peça nº do pedido; se não tiver, peça CPF/CNPJ. Diga que vai verificar no sistema.
 Se 'desisti' → pergunte o motivo.
 Se falta de saldo → ofereça até {maxdisc}% de desconto; pergunte se aceita.
 Se segurança → diga que o checkout é HTTPS/PSP oficial e convide a ver {insta} e {site} se pedir.
@@ -395,13 +399,17 @@ async def llm_reply(history: List[Dict[str, str]], ctx: Optional[Dict[str, Any]]
     )
     txt = resp.choices[0].message.content.strip()
 
-    # Fallback: nunca dizer “não tenho acesso”. Se sem contexto, peça dado. Se falhar, handoff humano.
-    if not ctx and ("acesso" in txt.lower() or "não consigo" in txt.lower()):
-        return (
-            "Preciso do nº do pedido ou CPF pra te passar os detalhes. "
-            "Se preferir, falo com o time humano agora."
-        )
-    return txt
+    # Fallback curto para "não chegou" / sem contexto
+if not ctx and (
+    "não chegou" in txt.lower()
+    or "nao chegou" in txt.lower()
+    or "não recebi" in txt.lower()
+    or "nao recebi" in txt.lower()
+    or "acesso" in txt.lower()
+    or "não consigo" in txt.lower()
+):
+    return "Me passa o nº do pedido? Se não tiver, pode ser CPF/CNPJ. Vou verificar no sistema."
+
 
 
 
