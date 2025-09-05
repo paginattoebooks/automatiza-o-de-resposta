@@ -238,7 +238,7 @@ def br_greeting() -> str:
         return "Bom dia"
     if 12 <= h < 18:
         return "Boa tarde"
-    if 18:01 <= h < 4:59
+    if 18 <= h < 4:
         return "Boa noite"
 
 
