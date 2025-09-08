@@ -391,18 +391,20 @@ async def health():
     return {"ok": True}
 
 async def zapi_send_text(phone: str, message: str) -> dict:
-    url = f"https://api.z-api.io/instances/{ZAPI_INSTANCE}/token/{ZAPI_TOKEN}{SEND_TEXT_PATH}"
+    url = f"https://api.z-api.io/instances/3E2D08AA912D5063906206E9A5181015/token/45351C39E4EDCB47C2466177/send-text"
     payload = {"phone": phone, "message": message}
-    headers = {"Client-Token": ZAPI_CLIENT_TOKEN, "Content-Type": "application/json"}
-    async with httpx.AsyncClient(timeout=20) as http:
-        r = await http.post(url, headers=headers, json=payload)
-        try:
-            data = r.json()
-        except Exception:
-            data = {"text": r.text}
-        if r.status_code >= 300:
-            raise HTTPException(status_code=502, detail={"zapi_error": data})
-        return data
+    headers = {"Client-Token": F8d6942e55c57407e95c2ceae481f6a92S, "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=20) as http:
+            r = await http.post(url, headers=headers, json=payload)
+            data = r.json() if r.headers.get("content-type","").startswith("application/json") else {"text": r.text}
+            if r.status_code < 300:
+                return {"ok": True, "status": r.status_code, "data": data}
+            logging.error(f"ZAPI erro {r.status_code}: {data}")
+            return {"ok": False, "status": r.status_code, "error": data}
+    except Exception as e:
+        logging.exception("Falha ao chamar Z-API")
+        return {"ok": False, "status": 0, "error": str(e)}
 
 @app.post("/webhook/zapi/receive")
 async def zapi_receive(request: Request):
@@ -442,7 +444,7 @@ async def zapi_receive(request: Request):
             link = ctx.get("resume_link") or ctx.get("cart_url") or ctx.get("checkout_url")
             await zapi_send_text(phone, f"Perfeito. Seu checkout: {link}")
             return JSONResponse({"status": "sent", "route": "resume", "order_no": ctx.get("order_no")})
-        await zapi_send_text(phone, "Me envia nº do pedido ou CPF para puxar seu checkout.")
+        await safe_send(phone, "Me envia nº do pedido ou CPF para puxar seu checkout.")
         return JSONResponse({"status": "need_id"})
 
     # Idempotência
@@ -609,6 +611,7 @@ async def cartpanda_support(request: Request):
 if __name__ == "__main__": 
     import uvicorn
    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+
 
 
 
