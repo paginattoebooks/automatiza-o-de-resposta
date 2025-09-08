@@ -391,20 +391,26 @@ async def health():
     return {"ok": True}
 
 async def zapi_send_text(phone: str, message: str) -> dict:
+    if DRY_RUN:
+        logging.info(f"[DRY_RUN] -> {phone}: {message}")
+        return {"ok": True, "status": 204, "data": {"dry_run": True}}
+
     url = f"https://api.z-api.io/instances/3E2D08AA912D5063906206E9A5181015/token/45351C39E4EDCB47C2466177/send-text"
     payload = {"phone": phone, "message": message}
     headers = {"Client-Token": F8d6942e55c57407e95c2ceae481f6a92S, "Content-Type": "application/json"}
+
     try:
         async with httpx.AsyncClient(timeout=20) as http:
             r = await http.post(url, headers=headers, json=payload)
             data = r.json() if r.headers.get("content-type","").startswith("application/json") else {"text": r.text}
             if r.status_code < 300:
                 return {"ok": True, "status": r.status_code, "data": data}
-            logging.error(f"ZAPI erro {r.status_code}: {data}")
+            logging.error(f"Z-API erro {r.status_code}: {data}")
             return {"ok": False, "status": r.status_code, "error": data}
     except Exception as e:
         logging.exception("Falha ao chamar Z-API")
         return {"ok": False, "status": 0, "error": str(e)}
+
 
 @app.post("/webhook/zapi/receive")
 async def zapi_receive(request: Request):
@@ -503,11 +509,13 @@ except Exception as e:
     logging.exception("LLM error")
     ai = f"{br_greeting()}! Como posso ajudar?"
 
+# depois do try/except do llm_reply(...)
 ai = _clip(scrub_links_if_not_requested(msg, ai))
 
-    # Saudação curta se 1ª interação e mensagem genérica
-    if len(history) <= 1 and _normalize(msg) in {"oi", "ola", "olá", "bom dia", "boa tarde", "boa noite", "oii", "oie"}:
-        ai = f"{br_greeting()}! Como posso ajudar?"
+# Saudação curta se 1ª interação e mensagem genérica
+if len(history) <= 1 and _normalize(msg) in {"oi", "ola", "olá", "bom dia", "boa tarde", "boa noite", "oii", "oie"}:
+    ai = f"{br_greeting()}! Como posso ajudar?"
+
 
     await zapi_send_text(phone, ai)
     history.append({"role": "assistant", "content": ai})
@@ -611,6 +619,7 @@ async def cartpanda_support(request: Request):
 if __name__ == "__main__": 
     import uvicorn
    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+
 
 
 
