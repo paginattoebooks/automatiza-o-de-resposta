@@ -494,14 +494,14 @@ async def zapi_receive(request: Request):
     history = json.loads(REDIS.get(history_key) or "[]")
     history.append({"role": "user", "content": msg})
 
-    ctx = order_context_by_keys(phone, msg)
-    try:
+ctx = order_context_by_keys(phone, msg)
+try:
     ai = await llm_reply(history, ctx, hints={})
 except Exception as e:
     logging.exception("LLM error")
     ai = f"{br_greeting()}! Como posso ajudar?"
 
-    ai = _clip(scrub_links_if_not_requested(msg, ai))
+ai = _clip(scrub_links_if_not_requested(msg, ai))
 
     # Saudação curta se 1ª interação e mensagem genérica
     if len(history) <= 1 and _normalize(msg) in {"oi", "ola", "olá", "bom dia", "boa tarde", "boa noite", "oii", "oie"}:
@@ -609,6 +609,7 @@ async def cartpanda_support(request: Request):
 if __name__ == "__main__": 
     import uvicorn
    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+
 
 
 
