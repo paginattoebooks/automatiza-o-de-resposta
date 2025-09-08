@@ -9,6 +9,7 @@ import re
 import json
 import unicodedata
 import logging
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Request, HTTPException
@@ -313,7 +314,7 @@ def order_summary(ctx: Optional[Dict[str, Any]]) -> str:
 SYSTEM_TEMPLATE = (
     "Saudação curta: '{greeting}, {name}, tudo bem? Como posso ajudar?' (sem nome: '{greeting}, tudo bem? Como posso ajudar?'). "
     "Respostas curtas: 1–2 frases. Sem textão. "
-    "Se pedirem produto específico → responda com {name}, {description}, {checkout} direto. "
+    "Se pedirem produto específico → responda com nome, descrição curta (máx. 2 frases) e checkout direto. "
     "Se pedirem detalhes do produto → forneça {description} completa, mas clipada a 2 frases. "
     "Se não pedirem link/site, não envie link algum. "
     "Entrega 100% digital. Nunca fale de endereço/frete/correios/rastreio. "
@@ -494,7 +495,12 @@ async def zapi_receive(request: Request):
     history.append({"role": "user", "content": msg})
 
     ctx = order_context_by_keys(phone, msg)
+    try:
     ai = await llm_reply(history, ctx, hints={})
+except Exception as e:
+    logging.exception("LLM error")
+    ai = f"{br_greeting()}! Como posso ajudar?"
+
     ai = _clip(scrub_links_if_not_requested(msg, ai))
 
     # Saudação curta se 1ª interação e mensagem genérica
@@ -602,7 +608,9 @@ async def cartpanda_support(request: Request):
 
 if __name__ == "__main__": 
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+   uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+
+
 
 
 
