@@ -439,7 +439,7 @@ async def zapi_receive(request: Request):
                             break
                 if prod:
                     reply = f"{prod['name']}\n{_clip(prod['description'])}\nCheckout: {prod['checkout']}\nEntrega 100% digital."
-                    await zapi_send_text(phone, reply)
+                    await safe_send(phone, reply)
                     return JSONResponse({"status":"sent","route":"product_select","product":prod["name"]})
 
 
@@ -448,7 +448,7 @@ async def zapi_receive(request: Request):
         ctx = order_context_by_keys(phone, msg)
          if ctx and (ctx.get("resume_link") or ctx.get("cart_url") or ctx.get("checkout_url")):
             link = ctx.get("resume_link") or ctx.get("cart_url") or ctx.get("checkout_url")
-            await zapi_send_text(phone, f"Perfeito. Seu checkout: {link}")
+            await safe_send(phone, f"Perfeito. Seu checkout: {link}")
             return JSONResponse({"status": "sent", "route": "resume", "order_no": ctx.get("order_no")})
         await safe_send(phone, "Me envia nº do pedido ou CPF para puxar seu checkout.")
         return JSONResponse({"status": "need_id"})
@@ -519,7 +519,7 @@ if msg_id:
 ctx = order_context_by_keys(phone, msg)
 try:
     ai = await llm_reply(history, ctx, hints={})
-except Exception as e:
+except Exception:
     logging.exception("LLM error")
     ai = f"{br_greeting()}! Como posso ajudar?"
 
@@ -633,6 +633,7 @@ async def cartpanda_support(request: Request):
 if __name__ == "__main__": 
     import uvicorn
    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+
 
 
 
