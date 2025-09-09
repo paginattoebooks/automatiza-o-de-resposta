@@ -446,7 +446,7 @@ async def zapi_receive(request: Request):
     # Retomar carrinho/pedido pelo telefone
     if wants_resume(msg):
         ctx = order_context_by_keys(phone, msg)
-        if ctx and (ctx.get("resume_link") or ctx.get("cart_url") or ctx.get("checkout_url")):
+         if ctx and (ctx.get("resume_link") or ctx.get("cart_url") or ctx.get("checkout_url")):
             link = ctx.get("resume_link") or ctx.get("cart_url") or ctx.get("checkout_url")
             await zapi_send_text(phone, f"Perfeito. Seu checkout: {link}")
             return JSONResponse({"status": "sent", "route": "resume", "order_no": ctx.get("order_no")})
@@ -454,11 +454,15 @@ async def zapi_receive(request: Request):
         return JSONResponse({"status": "need_id"})
 
     # Idempotência
-    msg_id = data.get("messageId") or data.get("id") or (data.get("message") or {}).get("id")
-    if msg_id:
-        if REDIS.sismember("seen_ids", msg_id):
-            return JSONResponse({"status": "duplicate"})
-        REDIS.sadd("seen_ids", msg_id)
+    msg_id = data.get("messageId") or data.get("id")
+     m = data.get("message")
+if not msg_id and isinstance(m, dict):
+    msg_id = m.get("id")
+if msg_id:
+    if REDIS.sismember("seen_ids", msg_id):
+        return JSONResponse({"status": "duplicate"})
+    REDIS.sadd("seen_ids", msg_id)
+
 
     # Rotas rápidas
     intents = analyze_intent(msg)
@@ -619,6 +623,7 @@ async def cartpanda_support(request: Request):
 if __name__ == "__main__": 
     import uvicorn
    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+
 
 
 
