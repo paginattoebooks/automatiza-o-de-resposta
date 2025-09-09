@@ -493,16 +493,20 @@ async def zapi_receive(request: Request):
         send = await zapi_send_text(phone, text)
         return JSONResponse({"status":"sent","route":"menu","send":send})
     
-    # compra já realizada
-
-    if _has("ja comprei","já comprei","acabei de comprar","comprei","ja paguei","já paguei","paguei","efetuei o pagamento",
+  # compra já realizada
+if _has(
+    "ja comprei","já comprei","acabei de comprar","comprei",
+    "ja paguei","já paguei","paguei","efetuei o pagamento",
     "ja realizei a compra","já realizei a compra","realizei a compra",
-    "ja fiz o pedido","já fiz o pedido","fiz o pedido","pedido feito"):
-    send = await zapi_send_text(phone, "Parabéns pela sua compra. Confirme para mim se chegou tudo certinho no seu e-mail. Qualquer dúvida, estou à disposição.")
+    "ja fiz o pedido","já fiz o pedido","fiz o pedido","pedido feito"
+):
+    send = await zapi_send_text(
+        phone,
+        "Parabéns pela sua compra. Confirme para mim se chegou tudo certinho no seu e-mail. Qualquer dúvida, estou à disposição."
+    )
     return JSONResponse({"status": "sent", "route": "purchase_done", "send": send})
 
-    
-    # Seleção por número do menu (1..N)
+# Seleção por número do menu (1..N)
     if re.fullmatch(r"\d{1,2}", t or ""):
         idx = int(t) - 1
         menu_raw = REDIS.get(f"menu:{phone}")
@@ -649,3 +653,4 @@ async def cartpanda_support(request: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+
