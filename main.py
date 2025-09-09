@@ -454,10 +454,20 @@ async def zapi_receive(request: Request):
         return JSONResponse({"status": "need_id"})
 
     # Idempotência
-    msg_id = data.get("messageId") or data.get("id")
-     m = data.get("message")
-if not msg_id and isinstance(m, dict):
-    msg_id = m.get("id")
+  data = await request.json()
+
+msg_id = data.get("messageId") or data.get("id")
+msg = data.get("message") or data.get("body") or data.get("text") or ""
+
+# Se vier no formato objeto (ex.: {id, text/body})
+if isinstance(msg, dict):
+    msg_id = msg_id or msg.get("id")
+    msg = msg.get("text") or msg.get("body") or msg.get("message") or ""
+
+msg = str(msg)  # garante string
+phone = normalize_phone(data.get("phone") or (data.get("sender") or {}).get("phone") or "")
+if not phone or not msg:
+    return JSONResponse({"status": "ignored", "reason": "missing phone or text"})
 if msg_id:
     if REDIS.sismember("seen_ids", msg_id):
         return JSONResponse({"status": "duplicate"})
@@ -623,6 +633,7 @@ async def cartpanda_support(request: Request):
 if __name__ == "__main__": 
     import uvicorn
    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+
 
 
 
