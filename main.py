@@ -1,7 +1,7 @@
 """
 Paginatto — Iara WhatsApp Bot
 Z-API + ChatGPT + CartPanda (apenas via Webhook) + Catálogo JSON
-Python 3.11+
+Python 3.11+F
 """
 
 import os
@@ -393,86 +393,46 @@ async def health():
 async def zapi_send_text(phone: str, message: str) -> dict:
     if DRY_RUN:
         logging.info(f"[DRY_RUN] -> {phone}: {message}")
-        return {"ok": True, "status": 204, "data": {"dry_run": True}}
+        return {"ok": True, "dry_run": True}
 
-    url = f"https://api.z-api.io/instances/3E2D08AA912D5063906206E9A5181015/token/45351C39E4EDCB47C2466177/send-text"
+    url = f"https://api.z-api.io/instances/{ZAPI_INSTANCE}/token/{ZAPI_TOKEN}{SEND_TEXT_PATH}"
     payload = {"phone": phone, "message": message}
-    headers = {"Client-Token": F8d6942e55c57407e95c2ceae481f6a92S, "Content-Type": "application/json"}
+    headers = {"Client-Token": ZAPI_CLIENT_TOKEN, "Content-Type": "application/json"}
 
-    try:
-        async with httpx.AsyncClient(timeout=20) as http:
-            r = await http.post(url, headers=headers, json=payload)
-            data = r.json() if r.headers.get("content-type","").startswith("application/json") else {"text": r.text}
-            if r.status_code < 300:
-                return {"ok": True, "status": r.status_code, "data": data}
-            logging.error(f"Z-API erro {r.status_code}: {data}")
+    async with httpx.AsyncClient(timeout=20) as http:
+        r = await http.post(url, headers=headers, json=payload)
+        try:
+            data = r.json()
+        except Exception:
+            data = {"text": r.text}
+        if r.status_code >= 300:
+            # NÃO propague para o webhook
+            logging.error(f"Z-API {r.status_code}: {data}")
             return {"ok": False, "status": r.status_code, "error": data}
-    except Exception as e:
-        logging.exception("Falha ao chamar Z-API")
-        return {"ok": False, "status": 0, "error": str(e)}
-
+        return data
 
 @app.post("/webhook/zapi/receive")
 async def zapi_receive(request: Request):
     data = await request.json()
     logging.info(f"Webhook Z-API: {data}")
 
-    msg = (data.get("message") or data.get("body") or data.get("text") or "")
+    # --- extrai mensagem e id ---
+    msg = data.get("message") or data.get("body") or data.get("text") or ""
+    msg_id = data.get("messageId") or data.get("id")
+    if isinstance(msg, dict):
+        msg_id = msg.get("id") or msg_id
+        msg = msg.get("text") or msg.get("body") or msg.get("message") or ""
+
     phone = normalize_phone(data.get("phone") or (data.get("sender") or {}).get("phone") or "")
+
     if not phone or not msg:
         return JSONResponse({"status": "ignored", "reason": "missing phone or text"})
-        # Seleção por número a partir de um menu anterior
-    if re.fullmatch(r"\d{1,2}", _normalize(msg) or ""):
-        idx = int(_normalize(msg)) - 1
-        menu_raw = REDIS.get(f"menu:{phone}")
-        if menu_raw:
-            menu = json.loads(menu_raw)
-            if 0 <= idx < len(menu):
-                sel_key = menu[idx]["key"]
-                # encontra produto por key
-                prod = PRODUCTS.get(sel_key)
-                if not prod:
-                    # fallback: busca por nome normalizado
-                    for p in PRODUCTS.values():
-                        if _normalize(p.get("name", "")) == sel_key:
-                            prod = p
-                            break
-                if prod:
-                    reply = f"{prod['name']}\n{_clip(prod['description'])}\nCheckout: {prod['checkout']}\nEntrega 100% digital."
-                    await safe_send(phone, reply)
-                    return JSONResponse({"status":"sent","route":"product_select","product":prod["name"]})
 
-
-    # Retomar carrinho/pedido pelo telefone
-    if wants_resume(msg):
-        ctx = order_context_by_keys(phone, msg)
-         if ctx and (ctx.get("resume_link") or ctx.get("cart_url") or ctx.get("checkout_url")):
-            link = ctx.get("resume_link") or ctx.get("cart_url") or ctx.get("checkout_url")
-            await safe_send(phone, f"Perfeito. Seu checkout: {link}")
-            return JSONResponse({"status": "sent", "route": "resume", "order_no": ctx.get("order_no")})
-        await safe_send(phone, "Me envia nº do pedido ou CPF para puxar seu checkout.")
-        return JSONResponse({"status": "need_id"})
-
-    # Idempotência
-  data = await request.json()
-
-msg_id = data.get("messageId") or data.get("id")
-msg = data.get("message") or data.get("body") or data.get("text") or ""
-
-# Se vier no formato objeto (ex.: {id, text/body})
-if isinstance(msg, dict):
-    msg_id = msg_id or msg.get("id")
-    msg = msg.get("text") or msg.get("body") or msg.get("message") or ""
-
-msg = str(msg)  # garante string
-phone = normalize_phone(data.get("phone") or (data.get("sender") or {}).get("phone") or "")
-if not phone or not msg:
-    return JSONResponse({"status": "ignored", "reason": "missing phone or text"})
-if msg_id:
-    if REDIS.sismember("seen_ids", msg_id):
-        return JSONResponse({"status": "duplicate"})
-    REDIS.sadd("seen_ids", msg_id)
-
+    # --- idempotência ---
+    if msg_id:
+        if REDIS.sismember("seen_ids", msg_id):
+            return JSONResponse({"status": "duplicate"})
+        REDIS.sadd("seen_ids", msg_id)
 
     # Rotas rápidas
     intents = analyze_intent(msg)
@@ -510,31 +470,27 @@ if msg_id:
         reply = f"{prod['name']}\n{_clip(prod['description'])}\nCheckout: {prod['checkout']}\nEntrega 100% digital."
         await zapi_send_text(phone, reply)
         return JSONResponse({"status": "sent", "route": "product", "product": prod["name"]})
-
-    # LLM curto
+        
+# --- LLM com fallback ---
     history_key = f"sessions:{phone}"
     history = json.loads(REDIS.get(history_key) or "[]")
-    history.append({"role": "user", "content": msg})
-
+    history.append({"role":"user","content":msg})
 ctx = order_context_by_keys(phone, msg)
 try:
-    ai = await llm_reply(history, ctx, hints={})
-except Exception:
-    logging.exception("LLM error")
-    ai = f"{br_greeting()}! Como posso ajudar?"
+        ctx = order_context_by_keys(phone, msg)
+        ai = await llm_reply(history, ctx, hints={})
+    except Exception:
+        logging.exception("LLM error")
+        ai = f"{br_greeting()}! Como posso ajudar?"
 
-# depois do try/except do llm_reply(...)
-ai = _clip(scrub_links_if_not_requested(msg, ai))
+    # saudação curta 1ª interação
+    if len(history) <= 1 and _normalize(msg) in {"oi","ola","olá","bom dia","boa tarde","boa noite","oii","oie"}:
+        ai = f"{br_greeting()}! Como posso ajudar?"
 
-# Saudação curta se 1ª interação e mensagem genérica
-if len(history) <= 1 and _normalize(msg) in {"oi", "ola", "olá", "bom dia", "boa tarde", "boa noite", "oii", "oie"}:
-    ai = f"{br_greeting()}! Como posso ajudar?"
-
-
-    await zapi_send_text(phone, ai)
-    history.append({"role": "assistant", "content": ai})
+    await safe_send(phone, _clip(scrub_links_if_not_requested(msg, ai)))
+    history.append({"role":"assistant","content":ai})
     REDIS.set(history_key, json.dumps(history))
-    return JSONResponse({"status": "sent", "route": "llm"})
+    return JSONResponse({"status":"sent","route":"llm"})
 
 @app.post("/webhook/zapi/status")
 async def zapi_status(request: Request):
@@ -633,6 +589,7 @@ async def cartpanda_support(request: Request):
 if __name__ == "__main__": 
     import uvicorn
    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+
 
 
 
