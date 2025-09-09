@@ -416,7 +416,7 @@ async def zapi_receive(request: Request):
     data = await request.json()
     logging.info(f"Webhook Z-API: {data}")
 
-    # --- extrai mensagem e id ---
+    # Extrai mensagem/ID de forma robusta (text/body/message; {message:{id,text,...}})
     msg = data.get("message") or data.get("body") or data.get("text") or ""
     msg_id = data.get("messageId") or data.get("id")
     if isinstance(msg, dict):
@@ -424,11 +424,10 @@ async def zapi_receive(request: Request):
         msg = msg.get("text") or msg.get("body") or msg.get("message") or ""
 
     phone = normalize_phone(data.get("phone") or (data.get("sender") or {}).get("phone") or "")
-
     if not phone or not msg:
         return JSONResponse({"status": "ignored", "reason": "missing phone or text"})
 
-    # --- idempotência ---
+    # Idempotência
     if msg_id:
         if REDIS.sismember("seen_ids", msg_id):
             return JSONResponse({"status": "duplicate"})
@@ -437,57 +436,51 @@ async def zapi_receive(request: Request):
     # Rotas rápidas
     intents = analyze_intent(msg)
     if intents.get("delivery_question"):
-        txt = "É digital. Você recebe por e-mail/WhatsApp após o pagamento. Quer ajuda para finalizar?"
-        await zapi_send_text(phone, txt)
-        return JSONResponse({"status": "sent", "route": "quick"})
+        await zapi_send_text(phone, "É digital. Você recebe por e-mail/WhatsApp após o pagamento. Quer ajuda para finalizar?")
+        return JSONResponse({"status":"sent","route":"quick"})
     if intents.get("not_received_email"):
-        txt = "Me envia o nº do pedido ou CPF para eu checar."
-        await zapi_send_text(phone, txt)
-        return JSONResponse({"status": "sent", "route": "quick"})
+        await zapi_send_text(phone, "Me envia o nº do pedido ou CPF para eu checar.")
+        return JSONResponse({"status":"sent","route":"quick"})
     if intents.get("security"):
-        txt = "Checkout seguro com HTTPS e PSP oficial. Não pedimos senhas."
-        await zapi_send_text(phone, txt)
-        return JSONResponse({"status": "sent", "route": "quick"})
+        await zapi_send_text(phone, "Checkout seguro com HTTPS e PSP oficial. Não pedimos senhas.")
+        return JSONResponse({"status":"sent","route":"quick"})
     if intents.get("payment_problem"):
-        txt = "Em que etapa o pagamento travou? Posso ajudar a finalizar."
-        await zapi_send_text(phone, txt)
-        return JSONResponse({"status": "sent", "route": "quick"})
+        await zapi_send_text(phone, "Em que etapa o pagamento travou? Posso ajudar a finalizar.")
+        return JSONResponse({"status":"sent","route":"quick"})
     if intents.get("instagram_bonus"):
-        txt = "Siga @Paginatto e comente em 3 posts para o bônus! Qual seu @?"
-        await zapi_send_text(phone, txt)
-        return JSONResponse({"status": "sent", "route": "quick"})
+        await zapi_send_text(phone, "Siga @Paginatto e comente em 3 posts para o bônus! Qual seu @?")
+        return JSONResponse({"status":"sent","route":"quick"})
     if intents.get("support") or intents.get("product_select"):
         menu = build_product_menu(6)
         REDIS.set(f"menu:{phone}", json.dumps(menu))
         linhas = [f"{i+1}) {item['name']}" for i, item in enumerate(menu)]
-        txt = "Posso te ajudar com um produto. Digite o nome (ex.: 'antidoto') ou um número:\n" + "\n".join(linhas)
-        await zapi_send_text(phone, txt)
+        await zapi_send_text(phone, "Posso te ajudar com um produto. Digite o nome (ex.: 'antidoto') ou um número:\n" + "\n".join(linhas))
         return JSONResponse({"status":"sent","route":"menu"})
 
-    # Produto citado → checkout direto minimal
+    # Produto citado → checkout direto
     prod = find_product_in_text(msg)
     if prod:
         reply = f"{prod['name']}\n{_clip(prod['description'])}\nCheckout: {prod['checkout']}\nEntrega 100% digital."
         await zapi_send_text(phone, reply)
-        return JSONResponse({"status": "sent", "route": "product", "product": prod["name"]})
-        
-# --- LLM com fallback ---
+        return JSONResponse({"status":"sent","route":"product","product":prod["name"]})
+
+    # LLM com fallback
     history_key = f"sessions:{phone}"
     history = json.loads(REDIS.get(history_key) or "[]")
-    history.append({"role":"user","content":msg})
-ctx = order_context_by_keys(phone, msg)
-try:
+    history.append({"role": "user", "content": msg})
+
+    try:
         ctx = order_context_by_keys(phone, msg)
         ai = await llm_reply(history, ctx, hints={})
     except Exception:
         logging.exception("LLM error")
         ai = f"{br_greeting()}! Como posso ajudar?"
 
-    # saudação curta 1ª interação
     if len(history) <= 1 and _normalize(msg) in {"oi","ola","olá","bom dia","boa tarde","boa noite","oii","oie"}:
         ai = f"{br_greeting()}! Como posso ajudar?"
 
-    await safe_send(phone, _clip(scrub_links_if_not_requested(msg, ai)))
+    ai = _clip(scrub_links_if_not_requested(msg, ai))
+    await zapi_send_text(phone, ai)
     history.append({"role":"assistant","content":ai})
     REDIS.set(history_key, json.dumps(history))
     return JSONResponse({"status":"sent","route":"llm"})
@@ -586,9 +579,10 @@ async def cartpanda_support(request: Request):
 
 # --------------------------------- Run -------------------------------------
 
-if __name__ == "__main__": 
+if __name__ == "__main__":
     import uvicorn
-   uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+
 
 
 
