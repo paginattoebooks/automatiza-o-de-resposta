@@ -1,7 +1,8 @@
 fastapi
-uvicorn
+uvicorn[standard]
 httpx
 python-dotenv
-pydantic
+redis
 openai
-redis==5.0.1
+asyncpg
+
