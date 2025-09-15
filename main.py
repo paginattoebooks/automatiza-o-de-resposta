@@ -1,67 +1,21 @@
 """
 Paginatto — Iara WhatsApp Bot
-Z-API + ChatGPT + CartPanda (somente via Webhook) + Catálogo JSON
+Z-API + ChatGPT + CartPanda (API + Webhooks) + Catálogo JSON
 Python 3.11+
 """
 
-import os
-import re
-import json
-import unicodedata
-import logging
+import os, re, json, unicodedata, logging, uuid, hmac, hashlib, asyncio, random
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 import httpx
 
-try:
-    from zoneinfo import ZoneInfo
-except Exception:
-    ZoneInfo = None
-
-# ---------------------------------------------------------------------------
-# Redis (com fallback em memória)
-# ---------------------------------------------------------------------------
-import redis as _redis
-
-try:
-    REDIS = _redis.Redis.from_url(
-        os.getenv("REDIS_URL", "redis://localhost:6379"),
-        decode_responses=True
-    )
-    REDIS.ping()
-except Exception:
-    class _Mem:
-        def __init__(self):
-            self.kv = {}
-            self.h = {}
-            self.l = {}
-            self.s = {}
-        # KV
-        def get(self, k): return self.kv.get(k)
-        def set(self, k, v): self.kv[k] = v
-        # HASH
-        def hset(self, name, key, value): self.h.setdefault(name, {})[key] = value
-        def hget(self, name, key): return self.h.get(name, {}).get(key)
-        # LIST
-        def rpush(self, name, value): self.l.setdefault(name, []).append(value)
-        def lrange(self, name, start, end):
-            arr = self.l.get(name, [])
-            if end == -1: end = len(arr) - 1
-            return arr[start:end+1]
-        # SET
-        def sadd(self, name, value): self.s.setdefault(name, set()).add(value)
-        def sismember(self, name, value): return value in self.s.get(name, set())
-    REDIS = _Mem()
-
-# ---------------------------------------------------------------------------
-# Setup
-# ---------------------------------------------------------------------------
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# ------------------------------ Load env & logging ---------------------------
 load_dotenv()
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Iara")
 BRAND_NAME = os.getenv("BRAND_NAME", "Paginatto")
@@ -69,28 +23,28 @@ SITE_URL = os.getenv("SITE_URL", "https://paginattoebooks.github.io/Paginatto.si
 SUPPORT_URL = os.getenv("SUPPORT_URL", SITE_URL)
 CNPJ = os.getenv("CNPJ", "57.941.903/0001-94")
 
-SECURITY_BLURB = os.getenv("SECURITY_BLURB", "Checkout com HTTPS e PSP oficial. Não pedimos senhas ou códigos.")
-CHECKOUT_RESUME_BASE = os.getenv("CHECKOUT_RESUME_BASE", "https://somasoundsolutions.mycartpanda.com/resume/")
-DELIVERY_ONE_LINER = (
-    "Entrega 100% digital. Enviamos/liberamos o e-book por e-mail e WhatsApp após o pagamento. "
-    "Não pedimos endereço e não existe rastreio."
-)
+SECURITY_BLURB = os.getenv("SECURITY_BLURB", "Checkout com HTTPS e PSP oficial. Não pedimos senhas/códigos.")
+DELIVERY_ONE_LINER = "Entrega 100% digital. Acesso por e-mail/WhatsApp após pagamento."
+CHECKOUT_RESUME_BASE = os.getenv("CHECKOUT_RESUME_BASE", "https://paginattoebooks.github.io/Paginatto.site.com.br/")  
 
+# Z-API
 ZAPI_INSTANCE = os.getenv("ZAPI_INSTANCE", "3E2D08AA912D5063906206E9A5181015")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN", "45351C39E4EDCB47C2466177")
 ZAPI_CLIENT_TOKEN = os.getenv("ZAPI_CLIENT_TOKEN", "F8d6942e55c57407e95c2ceae481f6a92S")
 SEND_TEXT_PATH = os.getenv("SEND_TEXT_PATH", "/send-text")
 
+# Catálogo
 PRODUCTS_JSON_PATH = os.getenv("PRODUCTS_JSON_PATH", "produtos_paginatto.json")
 MAX_MENU_ITEMS = int(os.getenv("MAX_MENU_ITEMS", "6"))
-
-DRY_RUN = os.getenv("DRY_RUN", "false").strip().lower() in {"1", "true", "yes", "y"}
 
 # OpenAI
 from openai import OpenAI
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI = OpenAI(api_key=OPENAI_API_KEY)
+
+# Flags
+DRY_RUN = os.getenv("DRY_RUN", "false").strip().lower() in {"1","true","yes","y"}
 
 # Sanidade de env críticos
 for k, v in {
@@ -100,44 +54,74 @@ for k, v in {
     "ZAPI_CLIENT_TOKEN": ZAPI_CLIENT_TOKEN,
 }.items():
     if not v:
-        raise RuntimeError(f"Defina {k} no .env")
+        raise RuntimeError(f"Defina {k} no ambiente")
 
 app = FastAPI(title=f"{BRAND_NAME} — {ASSISTANT_NAME} Bot")
 
-# ---------------------------------------------------------------------------
-# Utilidades
-# ---------------------------------------------------------------------------
-CONTINUE_KW = {
-    "sim", "quero continuar", "continuar", "retomar", "seguir",
-    "finalizar", "pagar", "quero pagar", "voltar ao carrinho", "confirmar compra",
-    "retomar checkout", "retomar pedido", "link do checkout", "link do pedido"
-}
+# ------------------------------ Redis (com fallback) ------------------------
+import redis as _redis
+class _Mem:
+    def __init__(self):
+        self.kv, self.h, self.l, self.s = {}, {}, {}, {}
+    def get(self, k): return self.kv.get(k)
+    def set(self, k, v): self.kv[k] = v
+    def hset(self, name, key, value): self.h.setdefault(name, {})[key] = value
+    def hget(self, name, key): return self.h.get(name, {}).get(key)
+    def rpush(self, name, value): self.l.setdefault(name, []).append(value)
+    def lrange(self, name, start, end):
+        arr = self.l.get(name, []); end = len(arr)-1 if end == -1 else end
+        return arr[start:end+1]
+    def sadd(self, name, value): self.s.setdefault(name, set()).add(value)
+    def sismember(self, name, value): return value in self.s.get(name, set())
+    # extras p/ rate-limit
+    def incr(self, k): self.kv[k] = int(self.kv.get(k, 0)) + 1; return self.kv[k]
+    def expire(self, k, ttl): return True
 
+try:
+    REDIS = _redis.Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379"), decode_responses=True)
+    REDIS.ping()
+except Exception:
+    REDIS = _Mem()
+
+# ------------------------------ HTTP client & retry -------------------------
+HTTP = httpx.AsyncClient(timeout=httpx.Timeout(20.0))
+
+async def _retry(fn, tries=3, base=0.4, cap=3.0):
+    last = None
+    for i in range(tries):
+        try:
+            return await fn()
+        except Exception as e:
+            last = e
+            await asyncio.sleep(min(cap, base * (2 ** i)) + random.random()*0.2)
+    raise last
+
+# ------------------------------ Utils ---------------------------------------
+CONTINUE_KW = {
+    "sim","quero continuar","continuar","retomar","seguir","finalizar","pagar",
+    "quero pagar","voltar ao carrinho","confirmar compra","retomar checkout",
+    "retomar pedido","link do checkout","link do pedido","checkout","carrinho"
+}
 def _normalize(s: str) -> str:
     s = (s or "").lower()
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
     return re.sub(r"[^a-z0-9 ]+", " ", s).strip()
 
-def digits_only(v: str) -> str:
-    return re.sub(r"\D+", "", v or "")
+def digits_only(v: str) -> str: return re.sub(r"\D+", "", v or "")
 
 def normalize_phone(v: str) -> str:
     d = digits_only(v)
-    if d and not d.startswith("55"):
-        d = "55" + d
+    if d and not d.startswith("55"): d = "55" + d.lstrip("0")
     return d
 
 def br_greeting() -> str:
     try:
-        h = datetime.now(ZoneInfo("America/Sao_Paulo")).hour if ZoneInfo else datetime.utcnow().hour
-        m = datetime.now(ZoneInfo("America/Sao_Paulo")).minute if ZoneInfo else datetime.utcnow().minute
+        from zoneinfo import ZoneInfo
+        h = datetime.now(ZoneInfo("America/Sao_Paulo")).hour
     except Exception:
         h = datetime.utcnow().hour
-        m = datetime.utcnow().minute
-    if (h > 6 or (h == 6 and m >= 0)) and (h < 12):
-        return "Bom dia"
-    if 12 <= h < 18:
-        return "Boa tarde"
+    if 6 <= h < 12: return "Bom dia"
+    if 12 <= h < 18: return "Boa tarde"
     return "Boa noite"
 
 def first_name(v: Optional[str]) -> str:
@@ -146,26 +130,21 @@ def first_name(v: Optional[str]) -> str:
 
 def _clip(txt: str) -> str:
     txt = (txt or "").strip()
-    if not txt:
-        return txt
-    sentences = re.split(r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?|!)\s+', txt)
-    clipped = ' '.join(sentences[:2]).strip()
-    if clipped and not re.search(r'[.!?]$', clipped):
-        clipped += '.'
-    return clipped
+    if not txt: return txt
+    parts = re.split(r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?|!)\s+', txt)
+    out = " ".join(parts[:2]).strip()
+    if out and not re.search(r"[.!?]$", out): out += "."
+    return out
 
 def scrub_links_if_not_requested(user_text: str, reply: str) -> str:
-    if any(k in (user_text or "").lower() for k in ["site", "link", "checkout"]):
-        return reply
+    if any(k in (user_text or "").lower() for k in ["site","link","checkout"]): return reply
     return re.sub(r"https?://\S+", "", reply).strip()
 
 def wants_resume(text: str) -> bool:
     t = _normalize(text)
     return any(k in t for k in _normalize(" ".join(CONTINUE_KW)).split())
 
-# ---------------------------------------------------------------------------
-# Catálogo
-# ---------------------------------------------------------------------------
+# ------------------------------ Catálogo ------------------------------------
 def load_products(path: str) -> Dict[str, Dict[str, Any]]:
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -173,51 +152,31 @@ def load_products(path: str) -> Dict[str, Dict[str, Any]]:
     except Exception as e:
         logging.error(f"Falha ao carregar catálogo {path}: {e}")
         data = []
-
     out: Dict[str, Dict[str, Any]] = {}
     for item in data:
         name = (item.get("name") or "").strip()
         checkout = (item.get("checkout") or "").strip()
-        if not name or not checkout:
-            continue
-
+        if not name or not checkout: continue
         key = _normalize(name)
-        p: Dict[str, Any] = {
+        p = {
             "name": name,
             "checkout": checkout,
             "image": item.get("image", ""),
             "description": item.get("description", ""),
+            "sku": item.get("sku", ""),
         }
-
         aliases = {_normalize(name)}
-        # cada palavra significativa do nome
         for w in _normalize(name).split():
-            if len(w) > 3:
-                aliases.add(w)
-        # aliases vindos do JSON
-        for a in (item.get("aliases") or []):
-            aliases.add(_normalize(a))
-
-        # padrões para TabibX e variantes digitadas
+            if len(w) > 3: aliases.add(w)
+        for a in (item.get("aliases") or []): aliases.add(_normalize(a))
         m = re.search(r"(tabib).*(\d+)", name.lower())
         if m:
             n = m.group(2)
-            for pat in [
-                f"tabib {n}", f"tabib{n}",
-                f"tabib v {n}", f"tabib volume {n}",
-                f"volume {n}", f"v{n}",
-                f"bibi {n}", f"tab b {n}", f"tabb {n}", f"tabb{n}",
-                f"tabibit {n}", f"tabibit{n}"
-            ]:
+            for pat in [f"tabib {n}", f"tabib{n}", f"tab b {n}", f"tabb {n}", f"tabb{n}", f"v{n}", f"volume {n}"]:
                 aliases.add(_normalize(pat))
-
-        # exemplo comum: antídoto
-        if "antidoto" in _normalize(name):
-            aliases.update({"antidoto", "antídoto", "o livro antidoto", "qual é o livro antidoto"})
-
         p["aliases"] = list(aliases)
         out[key] = p
-    logging.info(f"Catálogo carregado: {len(out)} itens de {path}")
+    logging.info(f"Catálogo: {len(out)} itens")
     return out
 
 PRODUCTS = load_products(PRODUCTS_JSON_PATH)
@@ -226,111 +185,240 @@ def _top_products(n: int = MAX_MENU_ITEMS) -> List[Dict[str, Any]]:
     return list(PRODUCTS.values())[:n]
 
 def build_product_menu(n: int = MAX_MENU_ITEMS) -> List[Dict[str, str]]:
-    menu: List[Dict[str, str]] = []
+    menu = []
     for p in _top_products(n):
         name = (p.get("name") or "").strip()
-        if not name:
-            continue
-        menu.append({"name": name, "key": _normalize(name)})
+        if name: menu.append({"name": name, "key": _normalize(name)})
     return menu
 
 def find_product_in_text(text: str) -> Optional[Dict[str, Any]]:
     q = _normalize(text)
-    if not q:
-        return None
-
-    # 1) padrão "tabib 2", "tabb 3" etc.
-    m = re.search(r"\b(tabib|tabb|tab b|tabibit)\s*([1-9]\d?)\b", q)
+    if not q: return None
+    m = re.search(r"\b(tabib|tabb|tab b)\s*([1-9]\d?)\b", q)
     if m:
         want = m.group(2)
         for p in PRODUCTS.values():
             aliases = set(p.get("aliases", []))
-            probe = {
-                f"tabib {want}", f"tabib{want}", f"tabb {want}",
-                f"tabb{want}", f"tab b {want}", f"tabibit {want}", f"tabibit{want}"
-            }
-            if aliases & probe:
+            if aliases & {f"tabib {want}", f"tabib{want}", f"tabb {want}", f"tab b {want}"}:
                 return p
-
-    # 2) match de alias contido no texto
     for p in PRODUCTS.values():
         for a in p.get("aliases", []):
-            if a and a in q:
-                return p
-
-    # 3) fallback simples por sobreposição de tokens do nome
-    best = None
-    best_score = 0
+            if a and a in q: return p
+    best, best_score = None, 0
     q_tokens = set(q.split())
     for p in PRODUCTS.values():
-        name_tokens = set(_normalize(p.get("name", "")).split())
+        name_tokens = set(_normalize(p.get("name","")).split())
         score = len(q_tokens & name_tokens)
-        if score > best_score:
-            best = p
-            best_score = score
-    if best_score >= 2:
-        return best
+        if score > best_score: best, best_score = p, score
+    return best if best_score >= 2 else None
 
+def suggest_upsell(prod_key: str) -> Optional[Dict[str,str]]:
+    k = prod_key.lower()
+    if "tabib" in k:
+        return {"name":"Coleção TABIB Completa","sku":"TABIB_BUNDLE","pitch":"Leve os volumes com desconto exclusivo.","badge":"-15%"}
     return None
 
-# ---------------------------------------------------------------------------
-# Contexto de pedido (CartPanda)
-# ---------------------------------------------------------------------------
-def cpf_from_text(text: str) -> Optional[str]:
-    m = re.compile(r"\d{3}\.?\d{3}\.?\d{3}-?\d{2}").search(text or "")
-    return digits_only(m.group(0)) if m else None
+# ------------------------------ PostgreSQL ----------------------------------
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+if DATABASE_URL:
+    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+    import sqlalchemy as sa
+    engine = create_async_engine(DATABASE_URL, pool_size=5, max_overflow=5)
+    Session = async_sessionmaker(engine, expire_on_commit=False)
+    meta = sa.MetaData()
+    customers_tb = sa.Table("customers", meta,
+        sa.Column("id", sa.String(36), primary_key=True),
+        sa.Column("phone_e164", sa.String(16), unique=True, index=True, nullable=False),
+        sa.Column("name", sa.String(120)),
+        sa.Column("last_checkout_url", sa.Text),
+    )
+    messages_tb = sa.Table("messages", meta,
+        sa.Column("id", sa.String(36), primary_key=True),
+        sa.Column("customer_id", sa.String(36), index=True),
+        sa.Column("role", sa.String(10)),
+        sa.Column("text", sa.Text),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
+    )
+    checkouts_tb = sa.Table("checkouts", meta,
+        sa.Column("id", sa.String(36), primary_key=True),
+        sa.Column("phone_e164", sa.String(16), index=True),
+        sa.Column("sku", sa.String(64), index=True),
+        sa.Column("url", sa.Text, nullable=False),
+        sa.Column("status", sa.String(20)),  # created|paid|expired
+        sa.Column("source", sa.String(20)),  # webhook|api|catalog
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), onupdate=sa.func.now()),
+    )
+    webhook_events_tb = sa.Table("webhook_events", meta,
+        sa.Column("id", sa.String(36), primary_key=True),
+        sa.Column("idempotency_key", sa.String(128), unique=True, index=True),
+    )
+else:
+    Session = None
+    customers_tb = messages_tb = checkouts_tb = webhook_events_tb = None
 
-def orderno_from_text(text: str) -> Optional[str]:
-    m = re.compile(r"\b\d{6,}\b").search(text or "")
-    return m.group(0) if m else None
+async def pg_ensure_customer(phone_e164: str, name: str="") -> Optional[str]:
+    if not Session: return None
+    import sqlalchemy as sa
+    async with Session() as s, s.begin():
+        row = (await s.execute(sa.select(customers_tb.c.id).where(customers_tb.c.phone_e164==phone_e164))).first()
+        if row: return row[0]
+        cid = str(uuid.uuid4())
+        await s.execute(customers_tb.insert().values(id=cid, phone_e164=phone_e164, name=name))
+        return cid
 
-def order_context_by_keys(phone: str, text: str) -> Optional[Dict[str, Any]]:
-    # 1) último carrinho por telefone
-    token = REDIS.get(f"last_cart_by_phone:{phone}")
+async def pg_save_message(customer_id: Optional[str], role: str, text: str):
+    if not Session: return
+    async with Session() as s, s.begin():
+        await s.execute(messages_tb.insert().values(id=str(uuid.uuid4()), customer_id=customer_id, role=role, text=text))
+
+async def pg_upsert_checkout(phone_e164: str, url: str, status: str, source: str, sku: str=""):
+    if not Session: return
+    import sqlalchemy as sa
+    async with Session() as s, s.begin():
+        await s.execute(checkouts_tb.insert().values(
+            id=str(uuid.uuid4()), phone_e164=phone_e164, sku=sku, url=url, status=status, source=source
+        ))
+        await s.execute(customers_tb.update().where(customers_tb.c.phone_e164==phone_e164).values(last_checkout_url=url))
+
+async def pg_mark_webhook(idem_key: str) -> bool:
+    if not Session: return True
+    import sqlalchemy as sa
+    async with Session() as s, s.begin():
+        exists = (await s.execute(sa.select(webhook_events_tb.c.id).where(webhook_events_tb.c.idempotency_key==idem_key))).first()
+        if exists: return False
+        await s.execute(webhook_events_tb.insert().values(id=str(uuid.uuid4()), idempotency_key=idem_key))
+        return True
+
+# ------------------------------ CartPanda API --------------------------------
+def _cp_headers() -> Dict[str, str]:
+    return {"Authorization": f"Bearer {CARTPANDA_API_KEY}", "Content-Type": "application/json"}
+
+async def cp_list_abandoned_carts(page: int=1) -> Dict[str, Any]:
+    """GET /example/abandoned?page=1 (conforme payload enviado)."""
+    url = f"{CARTPANDA_BASE}/example/abandoned"
+    async def do(): return await HTTP.get(url, headers=_cp_headers(), params={"page": page})
+    r = await _retry(do)
+    if r.status_code >= 300: raise HTTPException(502, f"CartPanda abandoned {r.status_code}: {r.text}")
+    return r.json()
+
+async def cp_get_latest_abandoned_by_phone(phone_e164: str) -> Optional[Dict[str, Any]]:
+    """Varre páginas até achar o último cart do telefone. Cacheia no Redis."""
+    cache_key = f"cp:last_abandoned:{phone_e164}"
+    cached = REDIS.get(cache_key)
+    if cached: return json.loads(cached)
+
+    page = 1
+    for _ in range(5):  # limite de 5 páginas por chamada
+        js = await cp_list_abandoned_carts(page=page)
+        data = ((js.get("abandoned_carts") or {}).get("data") or [])
+        for c in data:
+            phone_raw = (((c.get("customer") or {}).get("phone")) or "")
+            if normalize_phone(phone_raw) == phone_e164:
+                REDIS.set(cache_key, json.dumps(c))
+                return c
+        if not ((js.get("abandoned_carts") or {}).get("next_page_url")):
+            break
+        page += 1
+    return None
+
+async def cp_list_orders(page: int=1) -> Dict[str, Any]:
+    """GET /orders?page=1 conforme schema enviado."""
+    url = f"{CARTPANDA_BASE}/orders"
+    async def do(): return await HTTP.get(url, headers=_cp_headers(), params={"page": page})
+    r = await _retry(do)
+    if r.status_code >= 300: raise HTTPException(502, f"CartPanda orders {r.status_code}: {r.text}")
+    return r.json()
+
+async def cp_get_latest_order_by_phone(phone_e164: str) -> Optional[Dict[str, Any]]:
+    cache_key = f"cp:last_order:{phone_e164}"
+    cached = REDIS.get(cache_key)
+    if cached: return json.loads(cached)
+
+    page = 1
+    for _ in range(5):
+        js = await cp_list_orders(page=page)
+        for o in js.get("data", []):
+            if normalize_phone(o.get("phone") or "") == phone_e164:
+                REDIS.set(cache_key, json.dumps(o))
+                return o
+        if not js.get("next_page_url"): break
+        page += 1
+    return None
+
+def cp_resume_link_from_token(cart_token: str) -> Optional[str]:
+    if not cart_token: return None
+    if CHECKOUT_RESUME_BASE:
+        return f"{CHECKOUT_RESUME_BASE}{cart_token}"
+    return None
+
+# ------------------------------ Link de checkout -----------------------------
+def extract_ctx_from_abandoned(c: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "cart_token": c.get("cart_token"),
+        "cart_url": c.get("cart_url"),
+        "resume_link": cp_resume_link_from_token(c.get("cart_token")) or c.get("cart_url"),
+        "customer": c.get("customer") or {},
+        "cart_total": c.get("cart_total"),
+        "currency": c.get("currency"),
+        "products": c.get("cart_line_items") or [],
+    }
+
+def extract_ctx_from_order(o: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "order_no": str(o.get("number") or o.get("order_number") or o.get("id") or ""),
+        "payment_status": o.get("payment_status"),
+        "checkout_url": o.get("thank_you_page") or o.get("order_status_url") or "",
+        "customer": {
+            "name": ((o.get("customer") or {}).get("full_name") or ""),
+            "email": o.get("email") or "",
+            "phone": o.get("phone") or "",
+            "document": digits_only(((o.get("customer") or {}).get("cpf") or "")),
+        },
+        "cart_token": o.get("cart_token") or "",
+    }
+
+async def resolve_checkout_context(phone_e164: str, text: str) -> Optional[Dict[str, Any]]:
+    """1) Redis cache 2) Abandoned por telefone 3) Orders por telefone."""
+    # Redis by phone
+    token = REDIS.get(f"last_cart_by_phone:{phone_e164}")
     if token:
         ctx_json = REDIS.hget("carts_by_token", token)
         if ctx_json:
             ctx = json.loads(ctx_json)
-            if ctx.get("cart_url"):
-                ctx["resume_link"] = ctx["cart_url"]
+            if ctx.get("cart_url"): ctx["resume_link"] = ctx.get("cart_url")
             return ctx
 
-    # 2) último pedido por telefone
-    order_no = REDIS.get(f"last_order_by_phone:{phone}")
-    if order_no:
-        ctx_json = REDIS.hget("orders_by_no", order_no)
-        if ctx_json:
-            ctx = json.loads(ctx_json)
-            if ctx.get("cart_token") and CHECKOUT_RESUME_BASE:
-                ctx["resume_link"] = f"{CHECKOUT_RESUME_BASE}{ctx['cart_token']}"
-            return ctx
+    # Abandoned via API
+    c = await cp_get_latest_abandoned_by_phone(phone_e164)
+    if c:
+        ctx = extract_ctx_from_abandoned(c)
+        REDIS.set(f"last_cart_by_phone:{phone_e164}", ctx.get("cart_token") or "")
+        if ctx.get("cart_token"): REDIS.hset("carts_by_token", ctx["cart_token"], json.dumps(ctx))
+        return ctx
 
-    # 3) nº do pedido no texto
-    order_no = orderno_from_text(text or "")
-    if order_no:
-        ctx_json = REDIS.hget("orders_by_no", order_no)
-        if ctx_json:
-            ctx = json.loads(ctx_json)
-            if ctx.get("cart_token") and CHECKOUT_RESUME_BASE:
-                ctx["resume_link"] = f"{CHECKOUT_RESUME_BASE}{ctx['cart_token']}"
-            return ctx
+    # Orders via API
+    o = await cp_get_latest_order_by_phone(phone_e164)
+    if o:
+        ctx = extract_ctx_from_order(o)
+        if ctx.get("cart_token"):
+            ctx["resume_link"] = cp_resume_link_from_token(ctx["cart_token"]) or ctx.get("checkout_url")
+            REDIS.set(f"last_cart_by_phone:{phone_e164}", ctx["cart_token"])
+            REDIS.hset("carts_by_token", ctx["cart_token"], json.dumps(ctx))
+        if ctx.get("order_no"):
+            REDIS.set(f"last_order_by_phone:{phone_e164}", ctx["order_no"])
+            REDIS.hset("orders_by_no", ctx["order_no"], json.dumps(ctx))
+        return ctx
 
-    # 4) CPF no texto
-    cpf = cpf_from_text(text or "")
-    if cpf:
-        nos = REDIS.lrange(f"orders_by_cpf:{cpf}", 0, -1)
-        if nos:
-            ctx_json = REDIS.hget("orders_by_no", nos[-1])
-            if ctx_json:
-                ctx = json.loads(ctx_json)
-                if ctx.get("cart_token") and CHECKOUT_RESUME_BASE:
-                    ctx["resume_link"] = f"{CHECKOUT_RESUME_BASE}{ctx['cart_token']}"
-                return ctx
+    # Nº do pedido no texto
+    m_order = re.search(r"\b\d{6,}\b", text or "")
+    if m_order:
+        js = REDIS.hget("orders_by_no", m_order.group(0))
+        if js: return json.loads(js)
+
     return None
 
 def order_summary(ctx: Optional[Dict[str, Any]]) -> str:
-    if not ctx:
-        return ""
+    if not ctx: return ""
     parts = []
     if ctx.get("order_no"): parts.append(f"Pedido: {ctx['order_no']}")
     if ctx.get("payment_status"): parts.append(f"Pagamento: {ctx['payment_status']}")
@@ -342,99 +430,114 @@ def order_summary(ctx: Optional[Dict[str, Any]]) -> str:
     if ctx.get("resume_link"): parts.append(f"Retomar: {ctx['resume_link']}")
     return " | ".join(parts)
 
-# ---------------------------------------------------------------------------
-# Prompt/LLM
-# ---------------------------------------------------------------------------
+# ------------------------------ LLM policy ----------------------------------
 SYSTEM_TEMPLATE = (
     "Você é um assistente comercial curto e objetivo. "
     "Saudação curta: '{greeting}, {name}, tudo bem? Como posso ajudar?' (sem nome: '{greeting}, tudo bem? Como posso ajudar?'). "
-    "Responda em 1–2 frases. Sem textão. "
-    "Se pedirem produto específico → responda com nome, descrição curta (máx. 2 frases) e checkout direto. "
-    "Se pedirem detalhes → até 2 frases. "
-    "Se não pedirem link/site, não envie link algum. "
-    "Entrega 100% digital. Nunca fale de endereço/frete/correios/rastreio. "
-    "Se perguntarem por entrega/prazo/frete/rastreio → diga que é digital e enviada/liberada por e-mail/WhatsApp após pagamento, "
-    "e ofereça checar status pelo nº do pedido ou CPF. "
-    "Se perguntarem se chega na casa: diga que NÃO, pois é e-book digital. "
-    "Se segurança → cite checkout HTTPS/PSP oficial. "
-    "Se não recebeu por e-mail → peça nº do pedido ou CPF/CNPJ e ofereça reenvio. "
-    "Se pagamento travou → pergunte em que etapa e ofereça ajuda. "
-    "Se citar Instagram/engajamento → ofereça bônus após seguir e comentar 3 posts; peça @ para validar. "
-    "Nunca peça senhas/códigos. Nunca prometa alterar preço automaticamente."
+    "Responda em 1–2 frases. Se pedirem produto específico, responda com nome, descrição curta e checkout. "
+    "Se não pedirem link, não envie link. Entrega 100% digital por e-mail/WhatsApp após pagamento. "
+    "Se pedirem entrega/frete/rastreio, diga que é digital e peça nº do pedido ou CPF. "
+    "Se segurança, cite HTTPS e PSP oficial. Nunca peça senhas/códigos. Nunca prometa alterar preço."
 )
 
-def system_prompt(extra_context: Optional[Dict[str, Any]], hints: Optional[Dict[str, Any]] = None) -> str:
+def system_prompt(extra_ctx: Optional[Dict[str, Any]], hints: Optional[Dict[str, Any]]=None) -> str:
     greeting = br_greeting()
-    name = first_name(((extra_context or {}).get("customer") or {}).get("name") or (extra_context or {}).get("name"))
-    base = SYSTEM_TEMPLATE.format(greeting=greeting, name=name or "", site=SITE_URL)
+    name = first_name(((extra_ctx or {}).get("customer") or {}).get("name") or (extra_ctx or {}).get("name"))
+    base = SYSTEM_TEMPLATE.format(greeting=greeting, name=name or "")
+    if extra_ctx and extra_ctx.get("resume_link"):
+        base += f" Use este resume_link quando apropriado: {extra_ctx['resume_link']}"
     if hints and hints.get("product"):
-        p = hints["product"]
-        base += f" Produto foco: {p.get('name')}. Descrição: {p.get('description','')}. Entrega digital imediata."
-    if extra_context and extra_context.get("resume_link"):
-        base += f" Use este resume_link quando apropriado: {extra_context['resume_link']}"
-    if hints:
-        focos = [k for k, v in hints.items() if isinstance(v, bool) and v]
-        if focos:
-            base += " | FOCO: " + ",".join(focos)
+        p = hints["product"]; base += f" Produto foco: {p.get('name')}. {p.get('description','')}"
     return base
 
-async def llm_reply(history, ctx, hints):
-    msgs = [{"role": "system", "content": system_prompt(ctx, hints)}]
-    if ctx:
-        msgs.append({"role": "assistant", "content": f"DADOS_DO_PEDIDO: {order_summary(ctx)}"})
+async def llm_reply(history: List[Dict[str,str]], ctx: Optional[Dict[str,Any]], hints: Dict[str,Any]):
+    msgs = [{"role":"system","content":system_prompt(ctx,hints)}]
+    if ctx: msgs.append({"role":"assistant","content":f"DADOS_DO_PEDIDO: {order_summary(ctx)}"})
     msgs += history[-20:]
-
-    resp = OPENAI.chat.completions.create(
-        model=MODEL_NAME,
-        temperature=0.2,
-        max_tokens=160,
-        messages=msgs,
-    )
-    txt = (resp.choices[0].message.content or "").strip()
-
-    last_user = (history[-1]["content"] if history else "").lower()
-    if any(k in last_user for k in ["nao chegou","não chegou","nao recebi","não recebi"]) and not ctx:
-        return _clip("Me passa o nº do pedido? Se não tiver, pode ser CPF/CNPJ. Vou verificar no sistema.")
-    if any(k in last_user for k in ["acesso","nao consigo","não consigo"]) and not ctx:
-        return _clip("Me passa o nº do pedido ou CPF/CNPJ para eu localizar.")
+    try:
+        resp = OPENAI.chat.completions.create(model=OPENAI_MODEL, temperature=0.2, max_tokens=160, messages=msgs)
+        txt = (resp.choices[0].message.content or "").strip()
+    except Exception:
+        logging.exception("OPENAI_FAIL")
+        txt = "Como posso ajudar com pagamento, status ou produto?"
     return _clip(txt)
 
-# ---------------------------------------------------------------------------
-# Envio Z-API
-# ---------------------------------------------------------------------------
+# ------------------------------ Z-API senders -------------------------------
 async def zapi_send_text(phone: str, message: str) -> dict:
     if DRY_RUN:
         logging.info(f"[DRY_RUN] -> {phone}: {message}")
         return {"ok": True, "dry_run": True}
-
     url = f"https://api.z-api.io/instances/{ZAPI_INSTANCE}/token/{ZAPI_TOKEN}{SEND_TEXT_PATH}"
-    payload = {"phone": phone, "message": message}
     headers = {"Client-Token": ZAPI_CLIENT_TOKEN, "Content-Type": "application/json"}
+    async def do(): return await HTTP.post(url, headers=headers, json={"phone": phone, "message": message})
+    r = await _retry(do)
+    data = (r.json() if "application/json" in r.headers.get("content-type","") else {"text": r.text})
+    if r.status_code >= 300:
+        logging.error(f"Z-API {r.status_code}: {data}")
+        return {"ok": False, "status": r.status_code, "error": data}
+    return {"ok": True, "status": r.status_code, "data": data}
 
-    async with httpx.AsyncClient(timeout=20) as http:
-        r = await http.post(url, headers=headers, json=payload)
-        try:
-            data = r.json()
-        except Exception:
-            data = {"text": r.text}
-        if r.status_code >= 300:
-            logging.error(f"Z-API {r.status_code}: {data}")
-            return {"ok": False, "status": r.status_code, "error": data}
-        return {"ok": True, "status": r.status_code, "data": data}
+async def zapi_send_image(phone: str, image_url: str, caption: str="") -> dict:
+    if DRY_RUN:
+        logging.info(f"[DRY_RUN_IMG] -> {phone}: {image_url} | {caption}")
+        return {"ok": True, "dry_run": True}
+    url = f"https://api.z-api.io/instances/{ZAPI_INSTANCE}/token/{ZAPI_TOKEN}/send-image"
+    headers = {"Client-Token": ZAPI_CLIENT_TOKEN, "Content-Type": "application/json"}
+    async def do(): return await HTTP.post(url, headers=headers, json={"phone": phone, "image": image_url, "caption": caption})
+    r = await _retry(do)
+    data = (r.json() if "application/json" in r.headers.get("content-type","") else {"text": r.text})
+    return {"ok": r.status_code < 300, "status": r.status_code, "data": data}
 
-# ---------------------------------------------------------------------------
-# FastAPI Endpoints
-# ---------------------------------------------------------------------------
+async def zapi_send_file(phone: str, file_url: str, caption: str="") -> dict:
+    if DRY_RUN:
+        logging.info(f"[DRY_RUN_FILE] -> {phone}: {file_url} | {caption}")
+        return {"ok": True, "dry_run": True}
+    url = f"https://api.z-api.io/instances/{ZAPI_INSTANCE}/token/{ZAPI_TOKEN}/send-file"
+    headers = {"Client-Token": ZAPI_CLIENT_TOKEN, "Content-Type": "application/json"}
+    async def do(): return await HTTP.post(url, headers=headers, json={"phone": phone, "file": file_url, "caption": caption})
+    r = await _retry(do)
+    data = (r.json() if "application/json" in r.headers.get("content-type","") else {"text": r.text})
+    return {"ok": r.status_code < 300, "status": r.status_code, "data": data}
+
+# ------------------------------ Segurança Webhooks --------------------------
+def verify_cartpanda_hmac(raw_body: bytes, signature: str) -> bool:
+    if not CARTPANDA_HMAC_SECRET: return True  # opcional
+    if not signature: return False
+    mac = hmac.new(CARTPANDA_HMAC_SECRET.encode(), msg=raw_body, digestmod=hashlib.sha256).hexdigest()
+    try:
+        return hmac.compare_digest(mac, signature)
+    except Exception:
+        return mac == signature
+
+# ------------------------------ Rate limit ----------------------------------
+def rate_limit_ok(phone: str) -> bool:
+    # bucket por 60s e por 1h
+    m1 = f"rl:1m:{phone}"
+    m60 = f"rl:60m:{phone}"
+    c1 = REDIS.incr(m1); c60 = REDIS.incr(m60)
+    try:
+        REDIS.expire(m1, 60); REDIS.expire(m60, 3600)
+    except Exception:
+        pass
+    return c1 <= 40 and c60 <= 600  # limites
+
+# ------------------------------ Endpoints -----------------------------------
+EVENT_SET = "seen_cartpanda_events"
+
 @app.get("/health")
-async def health():
-    return {"ok": True}
+async def health(): return {"ok": True}
 
 @app.post("/webhook/zapi/receive")
-async def zapi_receive(request: Request):
-    data = await request.json()
-    logging.info(f"Webhook Z-API: {data}")
+async def zapi_receive(request: Request, x_client_token: Optional[str] = Header(None)):
+    if x_client_token != ZAPI_CLIENT_TOKEN:
+        raise HTTPException(status_code=401, detail="unauthorized")
 
-    # mensagem e id podem vir em formatos diferentes
+    raw = await request.body()
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"status":"ignored","reason":"invalid json"})
+
     msg = data.get("message") or data.get("body") or data.get("text") or ""
     msg_id = data.get("messageId") or data.get("id")
     if isinstance(msg, dict):
@@ -443,70 +546,80 @@ async def zapi_receive(request: Request):
 
     phone = normalize_phone(data.get("phone") or (data.get("sender") or {}).get("phone") or "")
     if not phone or not msg:
-        return JSONResponse({"status": "ignored", "reason": "missing phone or text"})
+        return JSONResponse({"status":"ignored","reason":"missing phone or text"})
 
-    # Idempotência
+    # rate limit
+    if not rate_limit_ok(phone):
+        await zapi_send_text(phone, "Muitas mensagens agora. Vou responder por partes, ok?")
+        return JSONResponse({"status":"rate_limited"})
+
+    # idempotência
     if msg_id:
-        if REDIS.sismember("seen_ids", msg_id):
-            return JSONResponse({"status": "duplicate"})
+        if REDIS.sismember("seen_ids", msg_id): return JSONResponse({"status":"duplicate"})
         REDIS.sadd("seen_ids", msg_id)
 
-    # Retomar checkout rapidamente
+    # persistência opcional
+    cid = await pg_ensure_customer(phone) if Session else None
+    await pg_save_message(cid, "user", msg)
+
+    # retomada de checkout
     if wants_resume(msg):
-        ctx = order_context_by_keys(phone, msg)
+        ctx = await resolve_checkout_context(phone, msg)
         if ctx and (ctx.get("resume_link") or ctx.get("cart_url") or ctx.get("checkout_url")):
             link = ctx.get("resume_link") or ctx.get("cart_url") or ctx.get("checkout_url")
+            await pg_upsert_checkout(phone, link, "created", "api")
             send = await zapi_send_text(phone, f"Perfeito. Seu checkout: {link}")
-            return JSONResponse({"status": "sent", "route": "resume", "send": send})
-        send = await zapi_send_text(phone, "Me envia nº do pedido ou CPF para puxar seu checkout.")
-        return JSONResponse({"status": "need_id", "send": send})
+            await pg_save_message(cid, "assistant", f"Perfeito. Seu checkout: {link}")
+            return JSONResponse({"status":"sent","route":"resume","send":send})
+        ai = "Me envia nº do pedido ou CPF para puxar seu checkout."
+        send = await zapi_send_text(phone, ai); await pg_save_message(cid, "assistant", ai)
+        return JSONResponse({"status":"need_id","send":send})
 
-    # Rotas rápidas (intenções)
+    # intenções rápidas
     t = _normalize(msg)
     def _has(*xs): return any(x in t for x in xs)
 
-    if _has("entrega","frete","chega","prazo","rastreio","rastreamento","correios","transportadora","endereco","endereço"):
-        send = await zapi_send_text(phone, "É digital. Você recebe por e-mail/WhatsApp após o pagamento. Quer ajuda para finalizar?")
-        return JSONResponse({"status": "sent", "route": "quick", "send": send})
+    if _has("entrega","frete","chega","prazo","rastreio","rastreamento","correios","endereco","endereço"):
+        ai = "É digital. Você recebe por e-mail/WhatsApp após o pagamento. Quer ajuda para finalizar?"
+        send = await zapi_send_text(phone, ai); await pg_save_message(cid, "assistant", ai)
+        return JSONResponse({"status":"sent","route":"quick","send":send})
 
     if _has("nao chegou","não chegou","nao recebi","não recebi","email","e mail","e-mail"):
-        send = await zapi_send_text(phone, "Me envia o nº do pedido ou CPF para eu checar.")
-        return JSONResponse({"status": "sent", "route": "quick", "send": send})
+        ai = "Me envia o nº do pedido ou CPF para eu checar."
+        send = await zapi_send_text(phone, ai); await pg_save_message(cid, "assistant", ai)
+        return JSONResponse({"status":"sent","route":"quick","send":send})
 
     if _has("seguran","golpe","fraude","medo"):
-        send = await zapi_send_text(phone, "Checkout seguro com HTTPS e PSP oficial. Não pedimos senhas.")
-        return JSONResponse({"status": "sent", "route": "quick", "send": send})
+        ai = "Checkout seguro com HTTPS e PSP oficial. Não pedimos senhas."
+        send = await zapi_send_text(phone, ai); await pg_save_message(cid, "assistant", ai)
+        return JSONResponse({"status":"sent","route":"quick","send":send})
 
-    if _has("nao consegui pagar","não consegui pagar","pagamento","pix","boleto","cartao","cartão","checkout"):
-        send = await zapi_send_text(phone, "Em que etapa o pagamento travou? Posso ajudar a finalizar.")
-        return JSONResponse({"status": "sent", "route": "quick", "send": send})
+    if _has("nao consegui pagar","não consegui pagar","pagamento","pix","boleto","cartao","cartão"):
+        ai = "Em que etapa o pagamento travou? PIX, cartão ou boleto?"
+        send = await zapi_send_text(phone, ai); await pg_save_message(cid, "assistant", ai)
+        return JSONResponse({"status":"sent","route":"quick","send":send})
 
     if _has("instagram","comentar","seguir","post"):
-        send = await zapi_send_text(phone, "Siga @Paginatto e comente em 3 posts para o bônus! Qual seu @?")
-        return JSONResponse({"status": "sent", "route": "quick", "send": send})
+        ai = "Siga @Paginatto e comente em 3 posts para bônus. Qual seu @?"
+        send = await zapi_send_text(phone, ai); await pg_save_message(cid, "assistant", ai)
+        return JSONResponse({"status":"sent","route":"quick","send":send})
 
     if _has("suporte","ajuda","atendimento","catalogo","catálogo","produto","produtos","selecionar produto","escolher produto"):
         menu = build_product_menu(MAX_MENU_ITEMS)
         REDIS.set(f"menu:{phone}", json.dumps(menu))
-        linhas = [f"{i+1}) {item['name']}" for i, item in enumerate(menu)]
-        text = "Posso te ajudar com um produto. Digite o nome (ex.: 'antidoto') ou um número:\n" + "\n".join(linhas)
-        send = await zapi_send_text(phone, text)
+        linhas = [f"{i+1}) {item['name']}" for i,item in enumerate(menu)]
+        text = "Digite o nome do produto ou um número:\n" + "\n".join(linhas)
+        send = await zapi_send_text(phone, text); await pg_save_message(cid, "assistant", text)
         return JSONResponse({"status":"sent","route":"menu","send":send})
-    
-  # compra já realizada
-if _has(
-    "ja comprei","já comprei","acabei de comprar","comprei",
-    "ja paguei","já paguei","paguei","efetuei o pagamento",
-    "ja realizei a compra","já realizei a compra","realizei a compra",
-    "ja fiz o pedido","já fiz o pedido","fiz o pedido","pedido feito"
-):
-    send = await zapi_send_text(
-        phone,
-        "Parabéns pela sua compra. Confirme para mim se chegou tudo certinho no seu e-mail. Qualquer dúvida, estou à disposição."
-    )
-    return JSONResponse({"status": "sent", "route": "purchase_done", "send": send})
 
-# Seleção por número do menu (1..N)
+    # compra concluída
+    if _has("ja comprei","já comprei","acabei de comprar","comprei","ja paguei","já paguei","paguei","efetuei o pagamento",
+            "ja realizei a compra","já realizei a compra","realizei a compra","ja fiz o pedido","já fiz o pedido","fiz o pedido","pedido feito"):
+        ai = "Parabéns pela compra. Verifique seu e-mail. Se precisar, eu reenvio o acesso."
+        send = await zapi_send_text(phone, ai); await pg_save_message(cid, "assistant", ai)
+        return JSONResponse({"status":"sent","route":"purchase_done","send":send})
+
+    # seleção por número do menu
     if re.fullmatch(r"\d{1,2}", t or ""):
         idx = int(t) - 1
         menu_raw = REDIS.get(f"menu:{phone}")
@@ -516,84 +629,97 @@ if _has(
                 sel_key = menu[idx]["key"]
                 prod = PRODUCTS.get(sel_key)
                 if not prod:
-                    # fallback: busca por nome normalizado
                     for p in PRODUCTS.values():
-                        if _normalize(p.get("name", "")) == sel_key:
-                            prod = p
-                            break
+                        if _normalize(p.get("name","")) == sel_key: prod = p; break
                 if prod:
-                    reply = f"{prod['name']}\n{_clip(prod['description'])}\nCheckout: {prod['checkout']}\n{DELIVERY_ONE_LINER}"
-                    send = await zapi_send_text(phone, reply)
+                    phone_e164 = phone
+                    ctx = await resolve_checkout_context(phone_e164, msg)
+                    link = (ctx and (ctx.get("resume_link") or ctx.get("cart_url") or ctx.get("checkout_url"))) or prod["checkout"]
+                    await pg_upsert_checkout(phone_e164, link, "created", "api" if ctx else "catalog", prod.get("sku",""))
+                    reply = f"{prod['name']}\n{_clip(prod['description'])}\nCheckout: {link}\n{DELIVERY_ONE_LINER}"
+                    if prod.get("image"): await zapi_send_image(phone, prod["image"], caption=prod["name"])
+                    send = await zapi_send_text(phone, reply); await pg_save_message(cid, "assistant", reply)
+                    u = suggest_upsell(_normalize(prod["name"]))
+                    if u:
+                        ups = f"{u['name']} {u['badge']} — {u['pitch']}"
+                        await zapi_send_text(phone, ups); await pg_save_message(cid, "assistant", ups)
                     return JSONResponse({"status":"sent","route":"product_select","product":prod["name"],"send":send})
 
-    # Produto citado no texto (ex.: “qual é o livro antídoto”, “quero antídoto”)
+    # produto citado no texto
     prod = find_product_in_text(msg)
     if prod:
-        reply = f"{prod['name']}\n{_clip(prod['description'])}\nCheckout: {prod['checkout']}\n{DELIVERY_ONE_LINER}"
-        send = await zapi_send_text(phone, reply)
-        return JSONResponse({"status": "sent", "route": "product", "product": prod["name"], "send": send})
+        phone_e164 = phone
+        ctx = await resolve_checkout_context(phone_e164, msg)
+        link = (ctx and (ctx.get("resume_link") or ctx.get("cart_url") or ctx.get("checkout_url"))) or prod["checkout"]
+        await pg_upsert_checkout(phone_e164, link, "created", "api" if ctx else "catalog", prod.get("sku",""))
+        reply = f"{prod['name']}\n{_clip(prod['description'])}\nCheckout: {link}\n{DELIVERY_ONE_LINER}"
+        if prod.get("image"): await zapi_send_image(phone, prod["image"], caption=prod["name"])
+        send = await zapi_send_text(phone, reply); await pg_save_message(cid, "assistant", reply)
+        u = suggest_upsell(_normalize(prod["name"]))
+        if u:
+            ups = f"{u['name']} {u['badge']} — {u['pitch']}"
+            await zapi_send_text(phone, ups); await pg_save_message(cid, "assistant", ups)
+        return JSONResponse({"status":"sent","route":"product","product":prod["name"],"send":send})
 
-    # LLM com fallback
+    # LLM fallback
     history_key = f"sessions:{phone}"
     history = json.loads(REDIS.get(history_key) or "[]")
-    history.append({"role": "user", "content": msg})
-
-    try:
-        ctx = order_context_by_keys(phone, msg)
-        ai = await llm_reply(history, ctx, hints={})
-    except Exception:
-        logging.exception("LLM error")
+    history.append({"role":"user","content":msg})
+    ctx = await resolve_checkout_context(phone, msg)
+    ai = await llm_reply(history, ctx, hints={})
+    if len(history) == 1 and _normalize(msg) in {"oi","ola","olá","bom dia","boa tarde","boa noite","oii","oie"}:
         ai = f"{br_greeting()}! Como posso ajudar?"
-
-    # saudação só na 1ª interação e se texto for saudação
-    if len(history) <= 1 and _normalize(msg) in {"oi","ola","olá","bom dia","boa tarde","boa noite","oii","oie"}:
-        ai = f"{br_greeting()}! Como posso ajudar?"
-
     ai = _clip(scrub_links_if_not_requested(msg, ai))
-    send = await zapi_send_text(phone, ai)
-    if not send.get("ok"):
-        return JSONResponse({"status": "error", "route": "llm", "send": send}, status_code=502)
-
-    history.append({"role": "assistant", "content": ai})
+    send = await zapi_send_text(phone, ai); await pg_save_message(cid, "assistant", ai)
+    if not send.get("ok"): return JSONResponse({"status":"error","route":"llm","send":send}, status_code=502)
+    history.append({"role":"assistant","content":ai})
     REDIS.set(history_key, json.dumps(history))
     return JSONResponse({"status":"sent","route":"llm","send":send})
 
 @app.post("/webhook/zapi/status")
-async def zapi_status(request: Request):
+async def zapi_status(request: Request, x_client_token: Optional[str] = Header(None)):
+    if x_client_token != ZAPI_CLIENT_TOKEN:
+        raise HTTPException(status_code=401, detail="unauthorized")
     data = await request.json()
     logging.info(f"Webhook Z-API status: {data}")
     return {"ok": True}
 
-# ---------------------------------------------------------------------------
-# Webhooks CartPanda
-# ---------------------------------------------------------------------------
+# ----------------------------- Webhooks CartPanda ----------------------------
 @app.post("/webhook/cartpanda/order")
-async def cartpanda_order(request: Request):
+async def cartpanda_order(request: Request, **kw):
+    raw = await request.body()
+    signature = request.headers.get(CARTPANDA_SIG_HEADER, "")
+    if not verify_cartpanda_hmac(raw, signature):
+        raise HTTPException(status_code=401, detail="invalid signature")
+
     data = await request.json()
     logging.info(f"Webhook CartPanda: {data}")
 
-    # 1) lista de abandonados
+    # idempotência por event id
+    evt_id = str((data.get("id") or (data.get("data") or {}).get("id") or "")).strip()
+    if Session:
+        ok = await pg_mark_webhook(evt_id or str(uuid.uuid4()))
+        if not ok: return JSONResponse({"ok": True, "dup": True})
+    else:
+        if evt_id:
+            if REDIS.sismember(EVENT_SET, evt_id): return JSONResponse({"ok": True, "dup": True})
+            REDIS.sadd(EVENT_SET, evt_id)
+
+    # lista de abandonados
     carts = (data.get("abandoned_carts") or {}).get("data")
     if isinstance(carts, list):
         for c in carts:
             cart_token = (c.get("cart_token") or "").strip()
             phone = normalize_phone(((c.get("customer") or {}).get("phone")) or "")
-            if not phone or not cart_token:
-                continue
-            cart_url = c.get("cart_url") or ""
-            order_data = {
-                "cart_token": cart_token,
-                "cart_url": cart_url,
-                "customer": c.get("customer") or {},
-                "cart_total": c.get("cart_total"),
-                "currency": c.get("currency"),
-                "products": c.get("cart_line_items") or [],
-            }
+            if not phone or not cart_token: continue
+            ctx = extract_ctx_from_abandoned(c)
             REDIS.set(f"last_cart_by_phone:{phone}", cart_token)
-            REDIS.hset("carts_by_token", cart_token, json.dumps(order_data))
+            REDIS.hset("carts_by_token", cart_token, json.dumps(ctx))
+            if Session and ctx.get("resume_link"):
+                await pg_upsert_checkout(phone, ctx["resume_link"], "created", "webhook")
         return JSONResponse({"ok": True, "mode": "abandoned_list", "count": len(carts)})
 
-    # 2) evento único
+    # evento único
     d = data.get("data") or data
     customer = d.get("customer") or {}
     phone = normalize_phone(customer.get("phone") or d.get("phone") or "")
@@ -604,52 +730,53 @@ async def cartpanda_order(request: Request):
     if not phone and not cart_token and not order_no:
         return JSONResponse({"ok": False, "reason": "missing identifiers"}, status_code=400)
 
-    order_data = {
+    ctx = {
         "order_no": order_no or None,
         "cart_token": cart_token or None,
         "cart_url": cart_url or None,
         "customer": {
-            "name": customer.get("name") or d.get("name") or "",
+            "name": customer.get("full_name") or (customer.get("first_name","")+" "+customer.get("last_name","")).strip(),
             "email": (customer.get("email") or d.get("email") or "").strip().lower(),
             "phone": phone,
-            "document": digits_only(customer.get("document") or d.get("document") or d.get("cpf") or ""),
+            "document": digits_only(customer.get("cpf") or d.get("cpf") or ""),
         },
     }
-
     if phone and cart_token:
         REDIS.set(f"last_cart_by_phone:{phone}", cart_token)
-        REDIS.hset("carts_by_token", cart_token, json.dumps(order_data))
-
+        ctx["resume_link"] = cp_resume_link_from_token(cart_token) or cart_url
+        REDIS.hset("carts_by_token", cart_token, json.dumps(ctx))
+        if Session and ctx.get("resume_link"):
+            await pg_upsert_checkout(phone, ctx["resume_link"], "created", "webhook")
     if order_no:
-        REDIS.hset("orders_by_no", order_no, json.dumps(order_data))
-        if phone:
-            REDIS.set(f"last_order_by_phone:{phone}", order_no)
+        REDIS.hset("orders_by_no", order_no, json.dumps(ctx))
+        if phone: REDIS.set(f"last_order_by_phone:{phone}", order_no)
 
     return JSONResponse({"ok": True, "mode": "single", "has_token": bool(cart_token), "has_order": bool(order_no)})
 
 @app.post("/webhook/cartpanda/support")
 async def cartpanda_support(request: Request):
+    raw = await request.body()
+    signature = request.headers.get(CARTPANDA_SIG_HEADER, "")
+    if not verify_cartpanda_hmac(raw, signature):
+        raise HTTPException(status_code=401, detail="invalid signature")
+
     data = await request.json()
     logging.info(f"Webhook CartPanda suporte: {data}")
     d = data.get("data") or data
     order_no = str(d.get("order_no") or d.get("number") or d.get("id") or "").strip()
     phone = normalize_phone((d.get("customer") or {}).get("phone") or d.get("phone") or "")
-
-    if phone and order_no:
-        REDIS.set(f"last_order_by_phone:{phone}", order_no)
-    if order_no:
-        ctx_json = REDIS.hget("orders_by_no", order_no)
-        if not ctx_json:
-            REDIS.hset("orders_by_no", order_no, json.dumps({
-                "order_no": order_no,
-                "customer": d.get("customer") or {}
-            }))
-
+    if phone and order_no: REDIS.set(f"last_order_by_phone:{phone}", order_no)
+    if order_no and not REDIS.hget("orders_by_no", order_no):
+        REDIS.hset("orders_by_no", order_no, json.dumps({"order_no": order_no, "customer": d.get("customer") or {}}))
     return {"ok": True, "linked_phone": phone, "order_no": order_no}
 
-# ---------------------------------------------------------------------------
-# Run
-# ---------------------------------------------------------------------------
+# ------------------------------ Lifespan ------------------------------------
+@app.on_event("shutdown")
+async def shutdown_event():
+    try: await HTTP.aclose()
+    except Exception: pass
+
+# ------------------------------ Run (local) ---------------------------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
