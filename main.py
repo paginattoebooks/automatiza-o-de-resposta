@@ -378,42 +378,55 @@ def extract_ctx_from_order(o: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 async def resolve_checkout_context(phone_e164: str, text: str) -> Optional[Dict[str, Any]]:
-    """1) Redis cache 2) Abandoned por telefone 3) Orders por telefone."""
-    # Redis by phone
+    """
+    Sem API. Usa somente dados que já recebemos pelos webhooks
+    e o que salvamos no Postgres/Redis.
+    Ordem:
+      1) Redis: last_cart_by_phone -> carts_by_token
+      2) Redis: last_order_by_phone -> orders_by_no
+      3) Nº de pedido no texto -> orders_by_no
+      4) Postgres: customers.last_checkout_url
+    """
+    # 1) último carrinho conhecido
     token = REDIS.get(f"last_cart_by_phone:{phone_e164}")
     if token:
         ctx_json = REDIS.hget("carts_by_token", token)
         if ctx_json:
             ctx = json.loads(ctx_json)
-            if ctx.get("cart_url"): ctx["resume_link"] = ctx.get("cart_url")
+            if ctx.get("cart_url"):
+                ctx["resume_link"] = ctx.get("cart_url")
             return ctx
 
-    # Abandoned via API
-    c = await cp_get_latest_abandoned_by_phone(phone_e164)
-    if c:
-        ctx = extract_ctx_from_abandoned(c)
-        REDIS.set(f"last_cart_by_phone:{phone_e164}", ctx.get("cart_token") or "")
-        if ctx.get("cart_token"): REDIS.hset("carts_by_token", ctx["cart_token"], json.dumps(ctx))
-        return ctx
+    # 2) último pedido conhecido
+    order_no = REDIS.get(f"last_order_by_phone:{phone_e164}")
+    if order_no:
+        js = REDIS.hget("orders_by_no", order_no)
+        if js:
+            ctx = json.loads(js)
+            if ctx.get("cart_url") and not ctx.get("resume_link"):
+                ctx["resume_link"] = ctx["cart_url"]
+            return ctx
 
-    # Orders via API
-    o = await cp_get_latest_order_by_phone(phone_e164)
-    if o:
-        ctx = extract_ctx_from_order(o)
-        if ctx.get("cart_token"):
-            ctx["resume_link"] = cp_resume_link_from_token(ctx["cart_token"]) or ctx.get("checkout_url")
-            REDIS.set(f"last_cart_by_phone:{phone_e164}", ctx["cart_token"])
-            REDIS.hset("carts_by_token", ctx["cart_token"], json.dumps(ctx))
-        if ctx.get("order_no"):
-            REDIS.set(f"last_order_by_phone:{phone_e164}", ctx["order_no"])
-            REDIS.hset("orders_by_no", ctx["order_no"], json.dumps(ctx))
-        return ctx
+    # 3) nº de pedido mencionado no texto
+    m = re.search(r"\b\d{6,}\b", text or "")
+    if m:
+        js = REDIS.hget("orders_by_no", m.group(0))
+        if js:
+            ctx = json.loads(js)
+            if ctx.get("cart_url") and not ctx.get("resume_link"):
+                ctx["resume_link"] = ctx["cart_url"]
+            return ctx
 
-    # Nº do pedido no texto
-    m_order = re.search(r"\b\d{6,}\b", text or "")
-    if m_order:
-        js = REDIS.hget("orders_by_no", m_order.group(0))
-        if js: return json.loads(js)
+    # 4) fallback: último checkout salvo no banco
+    if Session:
+        import sqlalchemy as sa
+        async with Session() as s:
+            row = (await s.execute(
+                sa.select(customers_tb.c.last_checkout_url)
+                  .where(customers_tb.c.phone_e164 == phone_e164)
+            )).first()
+            if row and row[0]:
+                return {"resume_link": row[0], "customer": {"phone": phone_e164}}
 
     return None
 
@@ -805,6 +818,7 @@ async def shutdown_event():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+
 
 
 
