@@ -434,10 +434,19 @@ def order_summary(ctx: Optional[Dict[str, Any]]) -> str:
 SYSTEM_TEMPLATE = (
     "Você é um assistente comercial curto e objetivo. "
     "Saudação curta: '{greeting}, {name}, tudo bem? Como posso ajudar?' (sem nome: '{greeting}, tudo bem? Como posso ajudar?'). "
-    "Responda em 1–2 frases. Se pedirem produto específico, responda com nome, descrição curta e checkout. "
-    "Se não pedirem link, não envie link. Entrega 100% digital por e-mail/WhatsApp após pagamento. "
-    "Se pedirem entrega/frete/rastreio, diga que é digital e peça nº do pedido ou CPF. "
-    "Se segurança, cite HTTPS e PSP oficial. Nunca peça senhas/códigos. Nunca prometa alterar preço."
+    "Responda em 1–2 frases. Sem textão. "
+    "Se pedirem produto específico → responda com nome, descrição curta (máx. 2 frases) e checkout direto. "
+    "Se pedirem detalhes → até 2 frases. "
+    "Se não pedirem link/site, não envie link algum. "
+    "Entrega 100% digital. Nunca fale de endereço/frete/correios/rastreio. "
+    "Se perguntarem por entrega/prazo/frete/rastreio → diga que é digital e enviada/liberada por e-mail/WhatsApp após pagamento, "
+    "e ofereça checar status pelo nº do pedido ou CPF. "
+    "Se perguntarem se chega na casa: diga que NÃO, pois é e-book digital. "
+    "Se segurança → cite checkout HTTPS/PSP oficial. "
+    "Se não recebeu por e-mail → peça nº do pedido ou CPF/CNPJ e ofereça reenvio. "
+    "Se pagamento travou → pergunte em que etapa e ofereça ajuda. "
+    "Se citar Instagram/engajamento → ofereça bônus após seguir e comentar 3 posts; peça @ para validar. "
+    "Nunca peça senhas/códigos. Nunca prometa alterar preço automaticamente."
 )
 
 def system_prompt(extra_ctx: Optional[Dict[str, Any]], hints: Optional[Dict[str, Any]]=None) -> str:
@@ -780,4 +789,5 @@ async def shutdown_event():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+
 
