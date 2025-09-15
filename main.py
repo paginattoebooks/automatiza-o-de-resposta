@@ -532,13 +532,26 @@ def rate_limit_ok(phone: str) -> bool:
 
 # ------------------------------ Endpoints -----------------------------------
 EVENT_SET = "seen_cartpanda_events"
+ENFORCE_CLIENT_TOKEN = os.getenv("ENFORCE_CLIENT_TOKEN", "false").lower() in {"1","true","yes","y"}
 
+def _get_client_token(request: Request, x_client_token: Optional[str], client_token: Optional[str]) -> str:
+    # aceita 'x-client-token', 'client-token', 'Client-Token' e query ?client_token=
+    return (
+        x_client_token
+        or client_token
+        or request.headers.get("Client-Token")
+        or request.query_params.get("client_token")
+        or ""
+    )
 @app.get("/health")
 async def health(): return {"ok": True}
 
 @app.post("/webhook/zapi/receive")
-async def zapi_receive(request: Request, x_client_token: Optional[str] = Header(None)):
-    if x_client_token != ZAPI_CLIENT_TOKEN:
+async def zapi_receive(request: Request,
+                       x_client_token: Optional[str] = Header(None),
+                       client_token: Optional[str] = Header(None)):
+    token = _get_client_token(request, x_client_token, client_token)
+    if ENFORCE_CLIENT_TOKEN and token != ZAPI_CLIENT_TOKEN:
         raise HTTPException(status_code=401, detail="unauthorized")
 
     raw = await request.body()
@@ -686,8 +699,11 @@ async def zapi_receive(request: Request, x_client_token: Optional[str] = Header(
     return JSONResponse({"status":"sent","route":"llm","send":send})
 
 @app.post("/webhook/zapi/status")
-async def zapi_status(request: Request, x_client_token: Optional[str] = Header(None)):
-    if x_client_token != ZAPI_CLIENT_TOKEN:
+async def zapi_status(request: Request,
+                      x_client_token: Optional[str] = Header(None),
+                      client_token: Optional[str] = Header(None)):
+    token = _get_client_token(request, x_client_token, client_token)
+    if ENFORCE_CLIENT_TOKEN and token != ZAPI_CLIENT_TOKEN:
         raise HTTPException(status_code=401, detail="unauthorized")
     data = await request.json()
     logging.info(f"Webhook Z-API status: {data}")
@@ -789,5 +805,6 @@ async def shutdown_event():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+
 
 
