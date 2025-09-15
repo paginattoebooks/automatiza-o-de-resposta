@@ -1,72 +1,92 @@
 [
   {
     "name": "Tabib Volume 1: Tratamento de Dores e Inflamações",
-    "image": "C:\\Users\\User\\Desktop\\Paginatto-site\\foto site\\1.png",
-    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919679:1"
-    "description": "Guia para combater dores de cabeça, musculares e articulares, além de inflamações crônicas. Traz receitas naturais e eficazes para aliviar desconfortos do dia a dia sem efeitos colaterais."
+    "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/tabib-1.png",
+    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919679:1",
+    "description": "Guia para combater dores de cabeça, musculares e articulares, além de inflamações crônicas.",
+    "aliases": ["tabib 1","tabib1","v1","volume 1","inflamacoes","tratamento de dores"],
+    "sku": "TABIB_V1"
   },
   {
     "name": "Tabib Volume 2: Saúde Respiratória e Imunidade",
-    "image": "C:\\Users\\User\\Desktop\\Paginatto-site\\foto site\\2.png",
-    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919682:1"
-    "description": "Focado na saúde respiratória e fortalecimento da imunidade. Inclui receitas para tratar sinusite, rinite, gripes e resfriados."
+    "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/tabib-2.png",
+    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919682:1",
+    "description": "Focado na saúde respiratória e fortalecimento da imunidade.",
+    "aliases": ["tabib 2","tabib2","v2","volume 2","respiratoria","imunidade"],
+    "sku": "TABIB_V2"
   },
   {
     "name": "Tabib Volume 3: Saúde Digestiva e Metabólica",
-    "image": "C:\\Users\\User\\Desktop\\Paginatto-site\\foto site\\3.png",
-    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919686:1"
-    "description": "Reúne receitas que promovem equilíbrio digestivo e regulam o metabolismo. Indicado para quem busca aliviar desconfortos gástricos e desintoxicar o organismo."
+    "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/tabib-3.png",
+    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919686:1",
+    "description": "Receitas para equilíbrio digestivo e regulação do metabolismo.",
+    "aliases": ["tabib 3","tabib3","v3","volume 3","digestiva","metabolica"],
+    "sku": "TABIB_V3"
   },
   {
     "name": "Tabib Volume 4: Saúde Mental e Energética",
-    "image": "C:\\Users\\User\\Desktop\\Paginatto-site\\foto site\\4.png",
-    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/1669197"
-    "description":"Traz receitas para bem-estar emocional, redução do estresse e aumento da energia. Ajuda a melhorar o humor, o sono e o equilíbrio da mente."
-    
+    "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/tabib-4.png",
+    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/1669197:1",
+    "description": "Bem-estar emocional, redução do estresse e aumento da energia.",
+    "aliases": ["tabib 4","tabib4","v4","volume 4","saude mental","energia"],
+    "sku": "TABIB_V4"
   },
   {
     "name": "Tabib completo",
-    "image": "C:\\Users\\User\\Desktop\\Paginatto-site\\foto site\\5.png",
-    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/184229277:1"
-    "description": "Coletânea que une todos os volumes Tabib. Oferece soluções naturais para dores, imunidade, digestão e saúde mental, resgatando a sabedoria tradicional."
+    "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/tabib-completo.png",
+    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/184229277:1",
+    "description": "Coletânea com todos os volumes Tabib.",
+    "aliases": ["tabib completo","colecao tabib","coleção tabib","bundle tabib"],
+    "sku": "TABIB_FULL"
   },
   {
     "name": "Tabib 2025 + Bônus 19,90 + Tabib 2024",
-    "image": "C:\\Users\\User\\Desktop\\Paginatto-site\\foto site\\tabib 2.0 (2).png",
-    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/184229263:1"
-    "description": "Pacote que reúne duas edições completas do Tabib. Organizado por áreas de tratamento, é uma ferramenta prática para cuidados naturais e acessíveis."
-    
+    "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/tabib-2025-bonus-2024.png",
+    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/184229263:1",
+    "description": "Pacote com as edições 2025 e 2024.",
+    "aliases": ["tabib 2025","tabib 2024","tabib pacote","tabib combo"],
+    "sku": "TABIB_24_25_BUNDLE"
   },
   {
     "name": "Antídoto - Antídotos indígenas",
-    "image": "C:\\Users\\User\\Desktop\\Paginatto-site\\foto site\\antidoto.png",
-    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919637:1"
-    "description": "Inspirado em saberes indígenas, traz receitas naturais para tratar picadas de insetos e animais peçonhentos. Cada antídoto é explicado com detalhes sobre os ingredientes e seu efeito."
+    "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/antidoto.png",
+    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919637:1",
+    "description": "Receitas inspiradas em saberes indígenas para antídotos naturais.",
+    "aliases": ["antidoto","antídoto","o livro antidoto","antidotos indigenas"],
+    "sku": "ANTIDOTO"
   },
   {
     "name": "Kurimã - Óleos essenciais",
-    "image": "C:\\Users\\User\\Desktop\\Paginatto-site\\foto site\\kurima.png",
-    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919661:1"
-    "description": "Guia prático sobre óleos essenciais, com receitas e dicas para relaxamento, alívio de dores e cuidados com a pele. Ensina usos seguros e terapêuticos no dia a dia."
+    "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/kurima.png",
+    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919661:1",
+    "description": "Guia prático de óleos essenciais com receitas e usos seguros.",
+    "aliases": ["kurima","oleos essenciais","óleos essenciais"],
+    "sku": "KURIMA"
   },
   {
-    "name": "Balsamo - Pomadas naturais",
-    "image": "C:\\Users\\User\\Desktop\\Paginatto-site\\foto site\\balsamo.png",
-    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919668:1"
-    "description": "Manual para criar pomadas com plantas e ingredientes naturais. Inclui fórmulas para dores musculares, feridas, inflamações e mais, com explicações sobre cada componente."
+    "name": "Bálsamo - Pomadas naturais",
+    "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/balsamo.png",
+    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919668:1",
+    "description": "Fórmulas de pomadas naturais para dores, feridas e inflamações.",
+    "aliases": ["balsamo","pomadas naturais","pomada natural"],
+    "sku": "BALSAMO"
   },
   {
     "name": "Tratamento Natural Personalizado para Pressão Alta",
-    "image": "C:\\Users\\User\\Desktop\\Paginatto-site\\foto site\\pressão alta.png",
-    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/174502432:1"
-    "description": "Plano individualizado que combina alimentação, ervas naturais e exercícios para controlar a pressão arterial de forma segura e eficaz. Enviado por e-mail após o quiz."
+    "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/pressao-alta.png",
+    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/174502432:1",
+    "description": "Plano individualizado com alimentação, ervas e exercícios.",
+    "aliases": ["pressao alta","hipertensao","tratamento personalizado"],
+    "sku": "PRESSAO_ALTA_PLAN"
   },
   {
     "name": "300 receitas para AirFryer",
-    "image": "C:\\Users\\User\\Desktop\\Paginatto-site\\foto site\\airfair.png",
-    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/176702038:1"
-    "description": "Coletânea de receitas práticas e saborosas feitas especialmente para airfryer."
+    "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/airfryer-300.png",
+    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/176702038:1",
+    "description": "Coletânea prática de 300 receitas para airfryer.",
+    "aliases": ["airfryer","receitas airfryer","300 receitas"],
+    "sku": "AIRFRYER_300"
   }
-
 ]
+
 
