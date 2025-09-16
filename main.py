@@ -273,17 +273,25 @@ async def pg_ensure_customer(phone_e164: str, name: str="") -> Optional[str]:
 
 async def pg_save_message(customer_id: Optional[str], role: str, text: str):
     if not Session: return
-    async with Session() as s, s.begin():
-        await s.execute(messages_tb.insert().values(id=str(uuid.uuid4()), customer_id=customer_id, role=role, text=text))
+    try:
+        async with Session() as s, s.begin():
+            await s.execute(messages_tb.insert().values(
+                id=str(uuid.uuid4()), customer_id=customer_id, role=role, text=text))
+    except Exception:
+        logging.exception("pg_save_message")
 
 async def pg_upsert_checkout(phone_e164: str, url: str, status: str, source: str, sku: str=""):
     if not Session: return
-    import sqlalchemy as sa
-    async with Session() as s, s.begin():
-        await s.execute(checkouts_tb.insert().values(
-            id=str(uuid.uuid4()), phone_e164=phone_e164, sku=sku, url=url, status=status, source=source
-        ))
-        await s.execute(customers_tb.update().where(customers_tb.c.phone_e164==phone_e164).values(last_checkout_url=url))
+    try:
+        import sqlalchemy as sa
+        async with Session() as s, s.begin():
+            await s.execute(checkouts_tb.insert().values(
+                id=str(uuid.uuid4()), phone_e164=phone_e164, sku=sku, url=url, status=status, source=source))
+            await s.execute(customers_tb.update()
+                .where(customers_tb.c.phone_e164==phone_e164)
+                .values(last_checkout_url=url))
+    except Exception:
+        logging.exception("pg_upsert_checkout")
 
 async def pg_mark_webhook(idem_key: str) -> bool:
     if not Session: return True
@@ -497,7 +505,11 @@ async def zapi_send_text(phone: str, message: str) -> dict:
     url = f"https://api.z-api.io/instances/{ZAPI_INSTANCE}/token/{ZAPI_TOKEN}{SEND_TEXT_PATH}"
     headers = {"Client-Token": ZAPI_CLIENT_TOKEN, "Content-Type": "application/json"}
     async def do(): return await HTTP.post(url, headers=headers, json={"phone": phone, "message": message})
-    r = await _retry(do)
+    try:
+        r = await _retry(do)
+    except Exception as e:
+        logging.exception("ZAPI_SEND_TEXT_FAIL")
+        return {"ok": False, "error": str(e)}
     data = (r.json() if "application/json" in r.headers.get("content-type","") else {"text": r.text})
     if r.status_code >= 300:
         logging.error(f"Z-API {r.status_code}: {data}")
@@ -724,7 +736,10 @@ async def zapi_receive(request: Request,
         ai = f"{br_greeting()}! Como posso ajudar?"
     ai = _clip(scrub_links_if_not_requested(msg, ai))
     send = await zapi_send_text(phone, ai); await pg_save_message(cid, "assistant", ai)
-    if not send.get("ok"): return JSONResponse({"status":"error","route":"llm","send":send}, status_code=502)
+ if not send.get("ok"):
+    # loga e ainda assim retorna 200 para não derrubar o webhook
+    logging.error(f"send_fail: {send}")
+
     history.append({"role":"assistant","content":ai})
     REDIS.set(history_key, json.dumps(history))
     return JSONResponse({"status":"sent","route":"llm","send":send})
@@ -836,6 +851,7 @@ async def shutdown_event():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+
 
 
 
