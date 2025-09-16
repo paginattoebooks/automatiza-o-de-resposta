@@ -258,13 +258,18 @@ else:
 
 async def pg_ensure_customer(phone_e164: str, name: str="") -> Optional[str]:
     if not Session: return None
-    import sqlalchemy as sa
-    async with Session() as s, s.begin():
-        row = (await s.execute(sa.select(customers_tb.c.id).where(customers_tb.c.phone_e164==phone_e164))).first()
-        if row: return row[0]
-        cid = str(uuid.uuid4())
-        await s.execute(customers_tb.insert().values(id=cid, phone_e164=phone_e164, name=name))
-        return cid
+    try:
+        import sqlalchemy as sa
+        async with Session() as s, s.begin():
+            row = (await s.execute(sa.select(customers_tb.c.id)
+                                   .where(customers_tb.c.phone_e164==phone_e164))).first()
+            if row: return row[0]
+            cid = str(uuid.uuid4())
+            await s.execute(customers_tb.insert().values(id=cid, phone_e164=phone_e164, name=name))
+            return cid
+    except Exception:
+        logging.exception("pg_ensure_customer")
+        return None
 
 async def pg_save_message(customer_id: Optional[str], role: str, text: str):
     if not Session: return
@@ -556,6 +561,17 @@ def _get_client_token(request: Request, x_client_token: Optional[str], client_to
         or request.query_params.get("client_token")
         or ""
     )
+# --- DB bootstrap ---
+@app.on_event("startup")
+async def _db_bootstrap():
+    try:
+        if Session:
+            async with engine.begin() as conn:
+                await conn.run_sync(meta.create_all)  # cria se não existir
+            logging.info("DB pronto (tabelas verificadas).")
+    except Exception:
+        logging.exception("DB init failed")
+    
 @app.get("/health")
 async def health(): return {"ok": True}
 
@@ -570,6 +586,8 @@ async def zapi_receive(request: Request,
     raw = await request.body()
     try:
         data = await request.json()
+        logging.info(f"ZAPI RX -> {data}")
+
     except Exception:
         return JSONResponse({"status":"ignored","reason":"invalid json"})
 
@@ -818,6 +836,7 @@ async def shutdown_event():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+
 
 
 
