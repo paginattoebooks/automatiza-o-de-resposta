@@ -1,12 +1,12 @@
 """
 Paginatto — Iara WhatsApp Bot
-Z-API + ChatGPT + CartPanda (API + Webhooks) + Catálogo JSON
+Z-API + ChatGPT + CartPanda (Webhooks) + Catálogo JSON
 Python 3.11+
 """
 
 import os, re, json, unicodedata, logging, uuid, hmac, hashlib, asyncio, random
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.responses import JSONResponse
@@ -25,7 +25,7 @@ CNPJ = os.getenv("CNPJ", "57.941.903/0001-94")
 
 SECURITY_BLURB = os.getenv("SECURITY_BLURB", "Checkout com HTTPS e PSP oficial. Não pedimos senhas/códigos.")
 DELIVERY_ONE_LINER = "Entrega 100% digital. Acesso por e-mail/WhatsApp após pagamento."
-CHECKOUT_RESUME_BASE = os.getenv("CHECKOUT_RESUME_BASE", "https://paginattoebooks.github.io/Paginatto.site.com.br/")  
+CHECKOUT_RESUME_BASE = os.getenv("CHECKOUT_RESUME_BASE", "https://paginattoebooks.github.io/Paginatto.site.com.br/")
 
 # Z-API
 ZAPI_INSTANCE = os.getenv("ZAPI_INSTANCE", "3E2D08AA912D5063906206E9A5181015")
@@ -43,16 +43,17 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI = OpenAI(api_key=OPENAI_API_KEY)
 
+# CartPanda (somente webhooks; sem chamadas de API)
+CARTPANDA_SIG_HEADER = os.getenv("CARTPANDA_SIG_HEADER", "X-Cartpanda-Signature")
+CARTPANDA_HMAC_SECRET = os.getenv("CARTPANDA_HMAC_SECRET", "")
+
 # Flags
 DRY_RUN = os.getenv("DRY_RUN", "false").strip().lower() in {"1","true","yes","y"}
+ENFORCE_CLIENT_TOKEN = os.getenv("ENFORCE_CLIENT_TOKEN", "false").lower() in {"1","true","yes","y"}
+EVENT_SET = "seen_cartpanda_events"
 
-# Sanidade de env críticos
-for k, v in {
-    "OPENAI_API_KEY": OPENAI_API_KEY,
-    "ZAPI_INSTANCE": ZAPI_INSTANCE,
-    "ZAPI_TOKEN": ZAPI_TOKEN,
-    "ZAPI_CLIENT_TOKEN": ZAPI_CLIENT_TOKEN,
-}.items():
+# Sanidade de env críticos mínimos
+for k, v in {"OPENAI_API_KEY": OPENAI_API_KEY}.items():
     if not v:
         raise RuntimeError(f"Defina {k} no ambiente")
 
@@ -73,7 +74,6 @@ class _Mem:
         return arr[start:end+1]
     def sadd(self, name, value): self.s.setdefault(name, set()).add(value)
     def sismember(self, name, value): return value in self.s.get(name, set())
-    # extras p/ rate-limit
     def incr(self, k): self.kv[k] = int(self.kv.get(k, 0)) + 1; return self.kv[k]
     def expire(self, k, ttl): return True
 
@@ -108,7 +108,6 @@ def _normalize(s: str) -> str:
     return re.sub(r"[^a-z0-9 ]+", " ", s).strip()
 
 def digits_only(v: str) -> str: return re.sub(r"\D+", "", v or "")
-
 def normalize_phone(v: str) -> str:
     d = digits_only(v)
     if d and not d.startswith("55"): d = "55" + d.lstrip("0")
@@ -221,7 +220,7 @@ def suggest_upsell(prod_key: str) -> Optional[Dict[str,str]]:
 # ------------------------------ PostgreSQL ----------------------------------
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 if DATABASE_URL:
-    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
     import sqlalchemy as sa
     engine = create_async_engine(DATABASE_URL, pool_size=5, max_overflow=5)
     Session = async_sessionmaker(engine, expire_on_commit=False)
@@ -255,6 +254,16 @@ if DATABASE_URL:
 else:
     Session = None
     customers_tb = messages_tb = checkouts_tb = webhook_events_tb = None
+
+@app.on_event("startup")
+async def _db_bootstrap():
+    try:
+        if Session:
+            async with engine.begin() as conn:
+                await conn.run_sync(meta.create_all)
+            logging.info("DB pronto (tabelas verificadas).")
+    except Exception:
+        logging.exception("DB init failed")
 
 async def pg_ensure_customer(phone_e164: str, name: str="") -> Optional[str]:
     if not Session: return None
@@ -297,150 +306,17 @@ async def pg_mark_webhook(idem_key: str) -> bool:
     if not Session: return True
     import sqlalchemy as sa
     async with Session() as s, s.begin():
-        exists = (await s.execute(sa.select(webhook_events_tb.c.id).where(webhook_events_tb.c.idempotency_key==idem_key))).first()
+        exists = (await s.execute(sa.select(webhook_events_tb.c.id)
+                                  .where(webhook_events_tb.c.idempotency_key==idem_key))).first()
         if exists: return False
         await s.execute(webhook_events_tb.insert().values(id=str(uuid.uuid4()), idempotency_key=idem_key))
         return True
 
-# ------------------------------ CartPanda API --------------------------------
-def _cp_headers() -> Dict[str, str]:
-    return {"Authorization": f"Bearer {CARTPANDA_API_KEY}", "Content-Type": "application/json"}
-
-async def cp_list_abandoned_carts(page: int=1) -> Dict[str, Any]:
-    """GET /example/abandoned?page=1 (conforme payload enviado)."""
-    url = f"{CARTPANDA_BASE}/example/abandoned"
-    async def do(): return await HTTP.get(url, headers=_cp_headers(), params={"page": page})
-    r = await _retry(do)
-    if r.status_code >= 300: raise HTTPException(502, f"CartPanda abandoned {r.status_code}: {r.text}")
-    return r.json()
-
-async def cp_get_latest_abandoned_by_phone(phone_e164: str) -> Optional[Dict[str, Any]]:
-    """Varre páginas até achar o último cart do telefone. Cacheia no Redis."""
-    cache_key = f"cp:last_abandoned:{phone_e164}"
-    cached = REDIS.get(cache_key)
-    if cached: return json.loads(cached)
-
-    page = 1
-    for _ in range(5):  # limite de 5 páginas por chamada
-        js = await cp_list_abandoned_carts(page=page)
-        data = ((js.get("abandoned_carts") or {}).get("data") or [])
-        for c in data:
-            phone_raw = (((c.get("customer") or {}).get("phone")) or "")
-            if normalize_phone(phone_raw) == phone_e164:
-                REDIS.set(cache_key, json.dumps(c))
-                return c
-        if not ((js.get("abandoned_carts") or {}).get("next_page_url")):
-            break
-        page += 1
-    return None
-
-async def cp_list_orders(page: int=1) -> Dict[str, Any]:
-    """GET /orders?page=1 conforme schema enviado."""
-    url = f"{CARTPANDA_BASE}/orders"
-    async def do(): return await HTTP.get(url, headers=_cp_headers(), params={"page": page})
-    r = await _retry(do)
-    if r.status_code >= 300: raise HTTPException(502, f"CartPanda orders {r.status_code}: {r.text}")
-    return r.json()
-
-async def cp_get_latest_order_by_phone(phone_e164: str) -> Optional[Dict[str, Any]]:
-    cache_key = f"cp:last_order:{phone_e164}"
-    cached = REDIS.get(cache_key)
-    if cached: return json.loads(cached)
-
-    page = 1
-    for _ in range(5):
-        js = await cp_list_orders(page=page)
-        for o in js.get("data", []):
-            if normalize_phone(o.get("phone") or "") == phone_e164:
-                REDIS.set(cache_key, json.dumps(o))
-                return o
-        if not js.get("next_page_url"): break
-        page += 1
-    return None
-
+# ------------------------------ Checkout context (sem API) -------------------
 def cp_resume_link_from_token(cart_token: str) -> Optional[str]:
     if not cart_token: return None
     if CHECKOUT_RESUME_BASE:
         return f"{CHECKOUT_RESUME_BASE}{cart_token}"
-    return None
-
-# ------------------------------ Link de checkout -----------------------------
-def extract_ctx_from_abandoned(c: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "cart_token": c.get("cart_token"),
-        "cart_url": c.get("cart_url"),
-        "resume_link": cp_resume_link_from_token(c.get("cart_token")) or c.get("cart_url"),
-        "customer": c.get("customer") or {},
-        "cart_total": c.get("cart_total"),
-        "currency": c.get("currency"),
-        "products": c.get("cart_line_items") or [],
-    }
-
-def extract_ctx_from_order(o: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "order_no": str(o.get("number") or o.get("order_number") or o.get("id") or ""),
-        "payment_status": o.get("payment_status"),
-        "checkout_url": o.get("thank_you_page") or o.get("order_status_url") or "",
-        "customer": {
-            "name": ((o.get("customer") or {}).get("full_name") or ""),
-            "email": o.get("email") or "",
-            "phone": o.get("phone") or "",
-            "document": digits_only(((o.get("customer") or {}).get("cpf") or "")),
-        },
-        "cart_token": o.get("cart_token") or "",
-    }
-
-async def resolve_checkout_context(phone_e164: str, text: str) -> Optional[Dict[str, Any]]:
-    """
-    Sem API. Usa somente dados que já recebemos pelos webhooks
-    e o que salvamos no Postgres/Redis.
-    Ordem:
-      1) Redis: last_cart_by_phone -> carts_by_token
-      2) Redis: last_order_by_phone -> orders_by_no
-      3) Nº de pedido no texto -> orders_by_no
-      4) Postgres: customers.last_checkout_url
-    """
-    # 1) último carrinho conhecido
-    token = REDIS.get(f"last_cart_by_phone:{phone_e164}")
-    if token:
-        ctx_json = REDIS.hget("carts_by_token", token)
-        if ctx_json:
-            ctx = json.loads(ctx_json)
-            if ctx.get("cart_url"):
-                ctx["resume_link"] = ctx.get("cart_url")
-            return ctx
-
-    # 2) último pedido conhecido
-    order_no = REDIS.get(f"last_order_by_phone:{phone_e164}")
-    if order_no:
-        js = REDIS.hget("orders_by_no", order_no)
-        if js:
-            ctx = json.loads(js)
-            if ctx.get("cart_url") and not ctx.get("resume_link"):
-                ctx["resume_link"] = ctx["cart_url"]
-            return ctx
-
-    # 3) nº de pedido mencionado no texto
-    m = re.search(r"\b\d{6,}\b", text or "")
-    if m:
-        js = REDIS.hget("orders_by_no", m.group(0))
-        if js:
-            ctx = json.loads(js)
-            if ctx.get("cart_url") and not ctx.get("resume_link"):
-                ctx["resume_link"] = ctx["cart_url"]
-            return ctx
-
-    # 4) fallback: último checkout salvo no banco
-    if Session:
-        import sqlalchemy as sa
-        async with Session() as s:
-            row = (await s.execute(
-                sa.select(customers_tb.c.last_checkout_url)
-                  .where(customers_tb.c.phone_e164 == phone_e164)
-            )).first()
-            if row and row[0]:
-                return {"resume_link": row[0], "customer": {"phone": phone_e164}}
-
     return None
 
 def order_summary(ctx: Optional[Dict[str, Any]]) -> str:
@@ -455,6 +331,45 @@ def order_summary(ctx: Optional[Dict[str, Any]]) -> str:
     if ctx.get("checkout_url"): parts.append(f"Checkout: {ctx['checkout_url']}")
     if ctx.get("resume_link"): parts.append(f"Retomar: {ctx['resume_link']}")
     return " | ".join(parts)
+
+async def resolve_checkout_context(phone_e164: str, text: str) -> Optional[Dict[str, Any]]:
+    # 1) último carrinho conhecido
+    token = REDIS.get(f"last_cart_by_phone:{phone_e164}")
+    if token:
+        ctx_json = REDIS.hget("carts_by_token", token)
+        if ctx_json:
+            ctx = json.loads(ctx_json)
+            if ctx.get("cart_url"): ctx["resume_link"] = ctx.get("cart_url")
+            return ctx
+    # 2) último pedido conhecido
+    order_no = REDIS.get(f"last_order_by_phone:{phone_e164}")
+    if order_no:
+        js = REDIS.hget("orders_by_no", order_no)
+        if js:
+            ctx = json.loads(js)
+            if ctx.get("cart_url") and not ctx.get("resume_link"):
+                ctx["resume_link"] = ctx["cart_url"]
+            return ctx
+    # 3) pedido citado no texto
+    m = re.search(r"\b\d{6,}\b", text or "")
+    if m:
+        js = REDIS.hget("orders_by_no", m.group(0))
+        if js:
+            ctx = json.loads(js)
+            if ctx.get("cart_url") and not ctx.get("resume_link"):
+                ctx["resume_link"] = ctx["cart_url"]
+            return ctx
+    # 4) último checkout salvo no banco
+    if Session:
+        import sqlalchemy as sa
+        async with Session() as s:
+            row = (await s.execute(
+                sa.select(customers_tb.c.last_checkout_url)
+                  .where(customers_tb.c.phone_e164 == phone_e164)
+            )).first()
+            if row and row[0]:
+                return {"resume_link": row[0], "customer": {"phone": phone_e164}}
+    return None
 
 # ------------------------------ LLM policy ----------------------------------
 SYSTEM_TEMPLATE = (
@@ -507,41 +422,55 @@ async def zapi_send_text(phone: str, message: str) -> dict:
     async def do(): return await HTTP.post(url, headers=headers, json={"phone": phone, "message": message})
     try:
         r = await _retry(do)
+        data = (r.json() if "application/json" in r.headers.get("content-type","") else {"text": r.text})
+        if r.status_code >= 300:
+            logging.error(f"Z-API {r.status_code}: {data}")
+            return {"ok": False, "status": r.status_code, "error": data}
+        return {"ok": True, "status": r.status_code, "data": data}
     except Exception as e:
         logging.exception("ZAPI_SEND_TEXT_FAIL")
         return {"ok": False, "error": str(e)}
-    data = (r.json() if "application/json" in r.headers.get("content-type","") else {"text": r.text})
-    if r.status_code >= 300:
-        logging.error(f"Z-API {r.status_code}: {data}")
-        return {"ok": False, "status": r.status_code, "error": data}
-    return {"ok": True, "status": r.status_code, "data": data}
 
 async def zapi_send_image(phone: str, image_url: str, caption: str="") -> dict:
+    if not (image_url or "").lower().startswith("http"):
+        return {"ok": False, "error": "invalid_image_url"}
     if DRY_RUN:
         logging.info(f"[DRY_RUN_IMG] -> {phone}: {image_url} | {caption}")
         return {"ok": True, "dry_run": True}
     url = f"https://api.z-api.io/instances/{ZAPI_INSTANCE}/token/{ZAPI_TOKEN}/send-image"
     headers = {"Client-Token": ZAPI_CLIENT_TOKEN, "Content-Type": "application/json"}
     async def do(): return await HTTP.post(url, headers=headers, json={"phone": phone, "image": image_url, "caption": caption})
-    r = await _retry(do)
-    data = (r.json() if "application/json" in r.headers.get("content-type","") else {"text": r.text})
-    return {"ok": r.status_code < 300, "status": r.status_code, "data": data}
+    try:
+        r = await _retry(do)
+        data = (r.json() if "application/json" in r.headers.get("content-type","") else {"text": r.text})
+        return {"ok": r.status_code < 300, "status": r.status_code, "data": data}
+    except Exception as e:
+        logging.exception("ZAPI_SEND_IMAGE_FAIL")
+        return {"ok": False, "error": str(e)}
 
 async def zapi_send_file(phone: str, file_url: str, caption: str="") -> dict:
+    if not (file_url or "").lower().startswith("http"):
+        return {"ok": False, "error": "invalid_file_url"}
     if DRY_RUN:
         logging.info(f"[DRY_RUN_FILE] -> {phone}: {file_url} | {caption}")
         return {"ok": True, "dry_run": True}
     url = f"https://api.z-api.io/instances/{ZAPI_INSTANCE}/token/{ZAPI_TOKEN}/send-file"
     headers = {"Client-Token": ZAPI_CLIENT_TOKEN, "Content-Type": "application/json"}
     async def do(): return await HTTP.post(url, headers=headers, json={"phone": phone, "file": file_url, "caption": caption})
-    r = await _retry(do)
-    data = (r.json() if "application/json" in r.headers.get("content-type","") else {"text": r.text})
-    return {"ok": r.status_code < 300, "status": r.status_code, "data": data}
+    try:
+        r = await _retry(do)
+        data = (r.json() if "application/json" in r.headers.get("content-type","") else {"text": r.text})
+        return {"ok": r.status_code < 300, "status": r.status_code, "data": data}
+    except Exception as e:
+        logging.exception("ZAPI_SEND_FILE_FAIL")
+        return {"ok": False, "error": str(e)}
 
 # ------------------------------ Segurança Webhooks --------------------------
 def verify_cartpanda_hmac(raw_body: bytes, signature: str) -> bool:
-    if not CARTPANDA_HMAC_SECRET: return True  # opcional
-    if not signature: return False
+    if not CARTPANDA_HMAC_SECRET:  # verificação opcional
+        return True
+    if not signature:
+        return False
     mac = hmac.new(CARTPANDA_HMAC_SECRET.encode(), msg=raw_body, digestmod=hashlib.sha256).hexdigest()
     try:
         return hmac.compare_digest(mac, signature)
@@ -550,7 +479,6 @@ def verify_cartpanda_hmac(raw_body: bytes, signature: str) -> bool:
 
 # ------------------------------ Rate limit ----------------------------------
 def rate_limit_ok(phone: str) -> bool:
-    # bucket por 60s e por 1h
     m1 = f"rl:1m:{phone}"
     m60 = f"rl:60m:{phone}"
     c1 = REDIS.incr(m1); c60 = REDIS.incr(m60)
@@ -558,14 +486,10 @@ def rate_limit_ok(phone: str) -> bool:
         REDIS.expire(m1, 60); REDIS.expire(m60, 3600)
     except Exception:
         pass
-    return c1 <= 40 and c60 <= 600  # limites
+    return c1 <= 40 and c60 <= 600
 
 # ------------------------------ Endpoints -----------------------------------
-EVENT_SET = "seen_cartpanda_events"
-ENFORCE_CLIENT_TOKEN = os.getenv("ENFORCE_CLIENT_TOKEN", "false").lower() in {"1","true","yes","y"}
-
 def _get_client_token(request: Request, x_client_token: Optional[str], client_token: Optional[str]) -> str:
-    # aceita 'x-client-token', 'client-token', 'Client-Token' e query ?client_token=
     return (
         x_client_token
         or client_token
@@ -573,17 +497,7 @@ def _get_client_token(request: Request, x_client_token: Optional[str], client_to
         or request.query_params.get("client_token")
         or ""
     )
-# --- DB bootstrap ---
-@app.on_event("startup")
-async def _db_bootstrap():
-    try:
-        if Session:
-            async with engine.begin() as conn:
-                await conn.run_sync(meta.create_all)  # cria se não existir
-            logging.info("DB pronto (tabelas verificadas).")
-    except Exception:
-        logging.exception("DB init failed")
-    
+
 @app.get("/health")
 async def health(): return {"ok": True}
 
@@ -591,158 +505,159 @@ async def health(): return {"ok": True}
 async def zapi_receive(request: Request,
                        x_client_token: Optional[str] = Header(None),
                        client_token: Optional[str] = Header(None)):
-    token = _get_client_token(request, x_client_token, client_token)
-    if ENFORCE_CLIENT_TOKEN and token != ZAPI_CLIENT_TOKEN:
-        raise HTTPException(status_code=401, detail="unauthorized")
-
-    raw = await request.body()
     try:
-        data = await request.json()
-        logging.info(f"ZAPI RX -> {data}")
+        token = _get_client_token(request, x_client_token, client_token)
+        if ENFORCE_CLIENT_TOKEN and token != ZAPI_CLIENT_TOKEN:
+            raise HTTPException(status_code=401, detail="unauthorized")
 
-    except Exception:
-        return JSONResponse({"status":"ignored","reason":"invalid json"})
+        try:
+            data = await request.json()
+            logging.info(f"ZAPI RX -> {data}")
+        except Exception:
+            return JSONResponse({"status":"ignored","reason":"invalid json"})
 
-    msg = data.get("message") or data.get("body") or data.get("text") or ""
-    msg_id = data.get("messageId") or data.get("id")
-    if isinstance(msg, dict):
-        msg_id = msg.get("id") or msg_id
-        msg = msg.get("text") or msg.get("body") or msg.get("message") or ""
+        msg = data.get("message") or data.get("body") or data.get("text") or ""
+        msg_id = data.get("messageId") or data.get("id")
+        if isinstance(msg, dict):
+            msg_id = msg.get("id") or msg_id
+            msg = msg.get("text") or msg.get("body") or msg.get("message") or ""
 
-    phone = normalize_phone(data.get("phone") or (data.get("sender") or {}).get("phone") or "")
-    if not phone or not msg:
-        return JSONResponse({"status":"ignored","reason":"missing phone or text"})
+        phone = normalize_phone(data.get("phone") or (data.get("sender") or {}).get("phone") or "")
+        if not phone or not msg:
+            return JSONResponse({"status":"ignored","reason":"missing phone or text"})
 
-    # rate limit
-    if not rate_limit_ok(phone):
-        await zapi_send_text(phone, "Muitas mensagens agora. Vou responder por partes, ok?")
-        return JSONResponse({"status":"rate_limited"})
+        if not rate_limit_ok(phone):
+            await zapi_send_text(phone, "Muitas mensagens agora. Vou responder por partes, ok?")
+            return JSONResponse({"status":"rate_limited"})
 
-    # idempotência
-    if msg_id:
-        if REDIS.sismember("seen_ids", msg_id): return JSONResponse({"status":"duplicate"})
-        REDIS.sadd("seen_ids", msg_id)
+        if msg_id:
+            if REDIS.sismember("seen_ids", msg_id): return JSONResponse({"status":"duplicate"})
+            REDIS.sadd("seen_ids", msg_id)
 
-    # persistência opcional
-    cid = await pg_ensure_customer(phone) if Session else None
-    await pg_save_message(cid, "user", msg)
+        cid = await pg_ensure_customer(phone) if Session else None
+        await pg_save_message(cid, "user", msg)
 
-    # retomada de checkout
-    if wants_resume(msg):
+        # retomada de checkout
+        if wants_resume(msg):
+            ctx = await resolve_checkout_context(phone, msg)
+            if ctx and (ctx.get("resume_link") or ctx.get("cart_url") or ctx.get("checkout_url")):
+                link = ctx.get("resume_link") or ctx.get("cart_url") or ctx.get("checkout_url")
+                await pg_upsert_checkout(phone, link, "created", "api")
+                send = await zapi_send_text(phone, f"Perfeito. Seu checkout: {link}")
+                await pg_save_message(cid, "assistant", f"Perfeito. Seu checkout: {link}")
+                return JSONResponse({"status":"sent","route":"resume","send":send})
+            ai = "Me envia nº do pedido ou CPF para puxar seu checkout."
+            send = await zapi_send_text(phone, ai); await pg_save_message(cid, "assistant", ai)
+            return JSONResponse({"status":"need_id","send":send})
+
+        # intenções rápidas
+        t = _normalize(msg)
+        def _has(*xs): return any(x in t for x in xs)
+
+        if _has("entrega","frete","chega","prazo","rastreio","rastreamento","correios","endereco","endereço"):
+            ai = "É digital. Você recebe por e-mail/WhatsApp após o pagamento. Quer ajuda para finalizar?"
+            send = await zapi_send_text(phone, ai); await pg_save_message(cid, "assistant", ai)
+            return JSONResponse({"status":"sent","route":"quick","send":send})
+
+        if _has("nao chegou","não chegou","nao recebi","não recebi","email","e mail","e-mail"):
+            ai = "Me envia o nº do pedido ou CPF para eu checar."
+            send = await zapi_send_text(phone, ai); await pg_save_message(cid, "assistant", ai)
+            return JSONResponse({"status":"sent","route":"quick","send":send})
+
+        if _has("seguran","golpe","fraude","medo"):
+            ai = "Checkout seguro com HTTPS e PSP oficial. Não pedimos senhas."
+            send = await zapi_send_text(phone, ai); await pg_save_message(cid, "assistant", ai)
+            return JSONResponse({"status":"sent","route":"quick","send":send})
+
+        if _has("nao consegui pagar","não consegui pagar","pagamento","pix","boleto","cartao","cartão"):
+            ai = "Em que etapa o pagamento travou? PIX, cartão ou boleto?"
+            send = await zapi_send_text(phone, ai); await pg_save_message(cid, "assistant", ai)
+            return JSONResponse({"status":"sent","route":"quick","send":send})
+
+        if _has("instagram","comentar","seguir","post"):
+            ai = "Siga @Paginatto e comente em 3 posts para bônus. Qual seu @?"
+            send = await zapi_send_text(phone, ai); await pg_save_message(cid, "assistant", ai)
+            return JSONResponse({"status":"sent","route":"quick","send":send})
+
+        if _has("suporte","ajuda","atendimento","catalogo","catálogo","produto","produtos","selecionar produto","escolher produto"):
+            menu = build_product_menu(MAX_MENU_ITEMS)
+            REDIS.set(f"menu:{phone}", json.dumps(menu))
+            linhas = [f"{i+1}) {item['name']}" for i,item in enumerate(menu)]
+            text = "Digite o nome do produto ou um número:\n" + "\n".join(linhas)
+            send = await zapi_send_text(phone, text); await pg_save_message(cid, "assistant", text)
+            return JSONResponse({"status":"sent","route":"menu","send":send})
+
+        # compra concluída
+        if _has("ja comprei","já comprei","acabei de comprar","comprei","ja paguei","já paguei","paguei","efetuei o pagamento",
+                "ja realizei a compra","já realizei a compra","realizei a compra","ja fiz o pedido","já fiz o pedido","fiz o pedido","pedido feito"):
+            ai = "Parabéns pela compra. Verifique seu e-mail. Se precisar, eu reenvio o acesso."
+            send = await zapi_send_text(phone, ai); await pg_save_message(cid, "assistant", ai)
+            return JSONResponse({"status":"sent","route":"purchase_done","send":send})
+
+        # seleção por número do menu
+        if re.fullmatch(r"\d{1,2}", t or ""):
+            idx = int(t) - 1
+            menu_raw = REDIS.get(f"menu:{phone}")
+            if menu_raw:
+                menu = json.loads(menu_raw)
+                if 0 <= idx < len(menu):
+                    sel_key = menu[idx]["key"]
+                    prod = PRODUCTS.get(sel_key) or next((p for p in PRODUCTS.values()
+                                                          if _normalize(p.get("name","")) == sel_key), None)
+                    if prod:
+                        ctx = await resolve_checkout_context(phone, msg)
+                        link = (ctx and (ctx.get("resume_link") or ctx.get("cart_url") or ctx.get("checkout_url"))) or prod["checkout"]
+                        await pg_upsert_checkout(phone, link, "created", "api" if ctx else "catalog", prod.get("sku",""))
+                        reply = f"{prod['name']}\n{_clip(prod['description'])}\nCheckout: {link}\n{DELIVERY_ONE_LINER}"
+                        if (prod.get("image") or "").lower().startswith("http"):
+                            await zapi_send_image(phone, prod["image"], caption=prod["name"])
+                        send = await zapi_send_text(phone, reply); await pg_save_message(cid, "assistant", reply)
+                        u = suggest_upsell(_normalize(prod["name"]))
+                        if u:
+                            ups = f"{u['name']} {u['badge']} — {u['pitch']}"
+                            await zapi_send_text(phone, ups); await pg_save_message(cid, "assistant", ups)
+                        return JSONResponse({"status":"sent","route":"product_select","product":prod["name"],"send":send})
+
+        # produto citado no texto
+        prod = find_product_in_text(msg)
+        if prod:
+            ctx = await resolve_checkout_context(phone, msg)
+            link = (ctx and (ctx.get("resume_link") or ctx.get("cart_url") or ctx.get("checkout_url"))) or prod["checkout"]
+            await pg_upsert_checkout(phone, link, "created", "api" if ctx else "catalog", prod.get("sku",""))
+            reply = f"{prod['name']}\n{_clip(prod['description'])}\nCheckout: {link}\n{DELIVERY_ONE_LINER}"
+            if (prod.get("image") or "").lower().startswith("http"):
+                await zapi_send_image(phone, prod["image"], caption=prod["name"])
+            send = await zapi_send_text(phone, reply); await pg_save_message(cid, "assistant", reply)
+            u = suggest_upsell(_normalize(prod["name"]))
+            if u:
+                ups = f"{u['name']} {u['badge']} — {u['pitch']}"
+                await zapi_send_text(phone, ups); await pg_save_message(cid, "assistant", ups)
+            return JSONResponse({"status":"sent","route":"product","product":prod["name"],"send":send})
+
+        # LLM fallback
+        history_key = f"sessions:{phone}"
+        history = json.loads(REDIS.get(history_key) or "[]")
+        history.append({"role":"user","content":msg})
         ctx = await resolve_checkout_context(phone, msg)
-        if ctx and (ctx.get("resume_link") or ctx.get("cart_url") or ctx.get("checkout_url")):
-            link = ctx.get("resume_link") or ctx.get("cart_url") or ctx.get("checkout_url")
-            await pg_upsert_checkout(phone, link, "created", "api")
-            send = await zapi_send_text(phone, f"Perfeito. Seu checkout: {link}")
-            await pg_save_message(cid, "assistant", f"Perfeito. Seu checkout: {link}")
-            return JSONResponse({"status":"sent","route":"resume","send":send})
-        ai = "Me envia nº do pedido ou CPF para puxar seu checkout."
+        ai = await llm_reply(history, ctx, hints={})
+        if len(history) == 1 and _normalize(msg) in {"oi","ola","olá","bom dia","boa tarde","boa noite","oii","oie"}:
+            ai = f"{br_greeting()}! Como posso ajudar?"
+        ai = _clip(scrub_links_if_not_requested(msg, ai))
+
         send = await zapi_send_text(phone, ai); await pg_save_message(cid, "assistant", ai)
-        return JSONResponse({"status":"need_id","send":send})
+        if not send.get("ok"):
+            logging.error(f"send_fail: {send}")
 
-    # intenções rápidas
-    t = _normalize(msg)
-    def _has(*xs): return any(x in t for x in xs)
+        history.append({"role":"assistant","content":ai})
+        REDIS.set(history_key, json.dumps(history))
+        return JSONResponse({"status":"sent","route":"llm","send":send})
 
-    if _has("entrega","frete","chega","prazo","rastreio","rastreamento","correios","endereco","endereço"):
-        ai = "É digital. Você recebe por e-mail/WhatsApp após o pagamento. Quer ajuda para finalizar?"
-        send = await zapi_send_text(phone, ai); await pg_save_message(cid, "assistant", ai)
-        return JSONResponse({"status":"sent","route":"quick","send":send})
-
-    if _has("nao chegou","não chegou","nao recebi","não recebi","email","e mail","e-mail"):
-        ai = "Me envia o nº do pedido ou CPF para eu checar."
-        send = await zapi_send_text(phone, ai); await pg_save_message(cid, "assistant", ai)
-        return JSONResponse({"status":"sent","route":"quick","send":send})
-
-    if _has("seguran","golpe","fraude","medo"):
-        ai = "Checkout seguro com HTTPS e PSP oficial. Não pedimos senhas."
-        send = await zapi_send_text(phone, ai); await pg_save_message(cid, "assistant", ai)
-        return JSONResponse({"status":"sent","route":"quick","send":send})
-
-    if _has("nao consegui pagar","não consegui pagar","pagamento","pix","boleto","cartao","cartão"):
-        ai = "Em que etapa o pagamento travou? PIX, cartão ou boleto?"
-        send = await zapi_send_text(phone, ai); await pg_save_message(cid, "assistant", ai)
-        return JSONResponse({"status":"sent","route":"quick","send":send})
-
-    if _has("instagram","comentar","seguir","post"):
-        ai = "Siga @Paginatto e comente em 3 posts para bônus. Qual seu @?"
-        send = await zapi_send_text(phone, ai); await pg_save_message(cid, "assistant", ai)
-        return JSONResponse({"status":"sent","route":"quick","send":send})
-
-    if _has("suporte","ajuda","atendimento","catalogo","catálogo","produto","produtos","selecionar produto","escolher produto"):
-        menu = build_product_menu(MAX_MENU_ITEMS)
-        REDIS.set(f"menu:{phone}", json.dumps(menu))
-        linhas = [f"{i+1}) {item['name']}" for i,item in enumerate(menu)]
-        text = "Digite o nome do produto ou um número:\n" + "\n".join(linhas)
-        send = await zapi_send_text(phone, text); await pg_save_message(cid, "assistant", text)
-        return JSONResponse({"status":"sent","route":"menu","send":send})
-
-    # compra concluída
-    if _has("ja comprei","já comprei","acabei de comprar","comprei","ja paguei","já paguei","paguei","efetuei o pagamento",
-            "ja realizei a compra","já realizei a compra","realizei a compra","ja fiz o pedido","já fiz o pedido","fiz o pedido","pedido feito"):
-        ai = "Parabéns pela compra. Verifique seu e-mail. Se precisar, eu reenvio o acesso."
-        send = await zapi_send_text(phone, ai); await pg_save_message(cid, "assistant", ai)
-        return JSONResponse({"status":"sent","route":"purchase_done","send":send})
-
-    # seleção por número do menu
-    if re.fullmatch(r"\d{1,2}", t or ""):
-        idx = int(t) - 1
-        menu_raw = REDIS.get(f"menu:{phone}")
-        if menu_raw:
-            menu = json.loads(menu_raw)
-            if 0 <= idx < len(menu):
-                sel_key = menu[idx]["key"]
-                prod = PRODUCTS.get(sel_key)
-                if not prod:
-                    for p in PRODUCTS.values():
-                        if _normalize(p.get("name","")) == sel_key: prod = p; break
-                if prod:
-                    phone_e164 = phone
-                    ctx = await resolve_checkout_context(phone_e164, msg)
-                    link = (ctx and (ctx.get("resume_link") or ctx.get("cart_url") or ctx.get("checkout_url"))) or prod["checkout"]
-                    await pg_upsert_checkout(phone_e164, link, "created", "api" if ctx else "catalog", prod.get("sku",""))
-                    reply = f"{prod['name']}\n{_clip(prod['description'])}\nCheckout: {link}\n{DELIVERY_ONE_LINER}"
-                    if prod.get("image"): await zapi_send_image(phone, prod["image"], caption=prod["name"])
-                    send = await zapi_send_text(phone, reply); await pg_save_message(cid, "assistant", reply)
-                    u = suggest_upsell(_normalize(prod["name"]))
-                    if u:
-                        ups = f"{u['name']} {u['badge']} — {u['pitch']}"
-                        await zapi_send_text(phone, ups); await pg_save_message(cid, "assistant", ups)
-                    return JSONResponse({"status":"sent","route":"product_select","product":prod["name"],"send":send})
-
-    # produto citado no texto
-    prod = find_product_in_text(msg)
-    if prod:
-        phone_e164 = phone
-        ctx = await resolve_checkout_context(phone_e164, msg)
-        link = (ctx and (ctx.get("resume_link") or ctx.get("cart_url") or ctx.get("checkout_url"))) or prod["checkout"]
-        await pg_upsert_checkout(phone_e164, link, "created", "api" if ctx else "catalog", prod.get("sku",""))
-        reply = f"{prod['name']}\n{_clip(prod['description'])}\nCheckout: {link}\n{DELIVERY_ONE_LINER}"
-        if prod.get("image"): await zapi_send_image(phone, prod["image"], caption=prod["name"])
-        send = await zapi_send_text(phone, reply); await pg_save_message(cid, "assistant", reply)
-        u = suggest_upsell(_normalize(prod["name"]))
-        if u:
-            ups = f"{u['name']} {u['badge']} — {u['pitch']}"
-            await zapi_send_text(phone, ups); await pg_save_message(cid, "assistant", ups)
-        return JSONResponse({"status":"sent","route":"product","product":prod["name"],"send":send})
-
-    # LLM fallback
-    history_key = f"sessions:{phone}"
-    history = json.loads(REDIS.get(history_key) or "[]")
-    history.append({"role":"user","content":msg})
-    ctx = await resolve_checkout_context(phone, msg)
-    ai = await llm_reply(history, ctx, hints={})
-    if len(history) == 1 and _normalize(msg) in {"oi","ola","olá","bom dia","boa tarde","boa noite","oii","oie"}:
-        ai = f"{br_greeting()}! Como posso ajudar?"
-    ai = _clip(scrub_links_if_not_requested(msg, ai))
-    send = await zapi_send_text(phone, ai); await pg_save_message(cid, "assistant", ai)
- if not send.get("ok"):
-    # loga e ainda assim retorna 200 para não derrubar o webhook
-    logging.error(f"send_fail: {send}")
-
-    history.append({"role":"assistant","content":ai})
-    REDIS.set(history_key, json.dumps(history))
-    return JSONResponse({"status":"sent","route":"llm","send":send})
+    except HTTPException:
+        raise
+    except Exception:
+        logging.exception("UNHANDLED_receive")
+        # nunca derruba o webhook
+        return JSONResponse({"status":"error_handled"}, status_code=200)
 
 @app.post("/webhook/zapi/status")
 async def zapi_status(request: Request,
@@ -757,7 +672,7 @@ async def zapi_status(request: Request,
 
 # ----------------------------- Webhooks CartPanda ----------------------------
 @app.post("/webhook/cartpanda/order")
-async def cartpanda_order(request: Request, **kw):
+async def cartpanda_order(request: Request):
     raw = await request.body()
     signature = request.headers.get(CARTPANDA_SIG_HEADER, "")
     if not verify_cartpanda_hmac(raw, signature):
@@ -767,23 +682,30 @@ async def cartpanda_order(request: Request, **kw):
     logging.info(f"Webhook CartPanda: {data}")
 
     # idempotência por event id
-    evt_id = str((data.get("id") or (data.get("data") or {}).get("id") or "")).strip()
+    evt_id = str((data.get("id") or (data.get("data") or {}).get("id") or "")).strip() or str(uuid.uuid4())
+    if evt_id:
+        if REDIS.sismember(EVENT_SET, evt_id): return JSONResponse({"ok": True, "dup": True})
+        REDIS.sadd(EVENT_SET, evt_id)
     if Session:
-        ok = await pg_mark_webhook(evt_id or str(uuid.uuid4()))
-        if not ok: return JSONResponse({"ok": True, "dup": True})
-    else:
-        if evt_id:
-            if REDIS.sismember(EVENT_SET, evt_id): return JSONResponse({"ok": True, "dup": True})
-            REDIS.sadd(EVENT_SET, evt_id)
+        try:
+            ok = await pg_mark_webhook(evt_id)
+            if not ok: return JSONResponse({"ok": True, "dup": True})
+        except Exception:
+            logging.exception("pg_mark_webhook")
 
-    # lista de abandonados
+    # lista de abandonados (payload agregado)
     carts = (data.get("abandoned_carts") or {}).get("data")
     if isinstance(carts, list):
         for c in carts:
             cart_token = (c.get("cart_token") or "").strip()
             phone = normalize_phone(((c.get("customer") or {}).get("phone")) or "")
             if not phone or not cart_token: continue
-            ctx = extract_ctx_from_abandoned(c)
+            ctx = {
+                "cart_token": cart_token,
+                "cart_url": c.get("cart_url"),
+                "resume_link": cp_resume_link_from_token(cart_token) or c.get("cart_url"),
+                "customer": c.get("customer") or {},
+            }
             REDIS.set(f"last_cart_by_phone:{phone}", cart_token)
             REDIS.hset("carts_by_token", cart_token, json.dumps(ctx))
             if Session and ctx.get("resume_link"):
@@ -851,6 +773,8 @@ async def shutdown_event():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+
+
 
 
 
