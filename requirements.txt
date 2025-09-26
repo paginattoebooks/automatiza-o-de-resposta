@@ -2,5 +2,6 @@ Flask>=3.0
 gunicorn>=21.2
 redis>=5.0
 requests>=2.31
-openai>=1.0    # opcional; pode remover se não usar OPENAI_API_KEY
-python-dotenv>=1.0  # opcional, se usar .env local
+openai>=1.0
+python-dotenv>=1.0
+
