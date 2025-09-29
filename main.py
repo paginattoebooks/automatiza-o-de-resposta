@@ -80,21 +80,16 @@ CARTPANDA_SIG_HEADER = os.getenv("CARTPANDA_SIG_HEADER", "X-Cartpanda-Signature"
 CARTPANDA_HMAC_SECRET = os.getenv("CARTPANDA_HMAC_SECRET", "").strip()
 
 # Redis (obrigatório)
-import os, redis
+import os
+from redis import Redis
 
-REDIS_URL = os.getenv("REDIS_URL", "").strip()  # rediss://default:PASS@HOST:PORT
+REDIS_URL = os.getenv("REDIS_URL", "").strip()
 if not REDIS_URL:
-    raise RuntimeError("REDIS_URL não definido"))
+    raise RuntimeError("REDIS_URL não definido")
 
+# se o REDIS_URL começa com rediss://, o SSL já é tratado pelo driver
+r = Redis.from_url(REDIS_URL, decode_responses=True)
 
-r = redis.Redis(
-    host='redis-10779.crce196.sa-east-1-2.ec2.redns.redis-cloud.com',
-    port=10779,
-    username='default',
-    password='o3OUCw8CGlg2F9iPCqGxWDHZH7WLqqg1',
-    ssl=True,               
-    # ssl_cert_reqs=None,   
-    decode_responses=True,
 )
 
 @app.route("/health", methods=["GET"])
@@ -555,6 +550,7 @@ def index():
 # -------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
+
 
 
 
