@@ -5,7 +5,6 @@
 # - Recebe webhooks Cartpanda (order.created PIX pendente, order.paid entrega, abandoned.created, lista abandoned_carts)
 # - Recebe mensagens WhatsApp (Z-API inbound) + status webhook
 # - Envia texto/imagem/arquivo via Z-API (com retries)
-# - Memória e anti-repetição via Redis + rate limit
 #
 # Execução local:
 #   pip install -r requirements.txt
@@ -87,8 +86,6 @@ if not REDIS_URL:
     raise RuntimeError("REDIS_URL não definido")
 
 r = Redis.from_url(REDIS_URL, decode_responses=True)
-
-)
 
 @app.route("/health", methods=["GET"])
 def health():
@@ -548,6 +545,7 @@ def index():
 # -------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
+
 
 
 
