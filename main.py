@@ -25,8 +25,9 @@ import random
 from datetime import datetime, timedelta, timezone
 
 import requests
-from flask import Flask, request, jsonify, abort
-from redis import Redis
+from flask import Flask, jsonify
+from flask import Flask
+app = Flask(__name__)
 
 # -------------------------
 # Config
@@ -85,6 +86,15 @@ if not REDIS_URL:
     raise RuntimeError("REDIS_URL não definido")
 r: Redis = Redis.from_url(REDIS_URL, decode_responses=True)
 
+@app.route("/health", methods=["GET"])
+def health():
+    try:
+        r.ping()
+        return jsonify(ok=True), 200
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 500
+
+
 # Anti-repetição e upsell
 UPSELL_COOLDOWN_HOURS = int(os.getenv("UPSELL_COOLDOWN_HOURS", "24"))
 SENT_TTL_MIN = int(os.getenv("SENT_TTL_MIN", "90"))
@@ -122,6 +132,7 @@ COPY_FALLBACK = "{saud}, {nome}. Posso: retomar carrinho, pagar PIX ou reenviar 
 COPY_ENTREGA_DIGITAL = "É 100% digital. Você recebe por e-mail/WhatsApp após o pagamento."
 COPY_SEGURANCA = "Checkout HTTPS com PSP oficial. Nunca pedimos senhas/códigos."
 COPY_PAGAMENTO_TRAVOU = "Em que etapa travou? PIX, cartão ou boleto?"
+COPY_INSTAGRAM = "Tem bônus após seguir e comentar 3 posts no Instagram. Qual seu @ para validar?"
 
 # -------------------------
 # Utilitários
@@ -533,9 +544,6 @@ def index():
 # -------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
-
-
-
 
 
 
