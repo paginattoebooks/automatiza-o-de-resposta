@@ -80,14 +80,12 @@ CARTPANDA_SIG_HEADER = os.getenv("CARTPANDA_SIG_HEADER", "X-Cartpanda-Signature"
 CARTPANDA_HMAC_SECRET = os.getenv("CARTPANDA_HMAC_SECRET", "").strip()
 
 # Redis (obrigatório)
-import os
 from redis import Redis
 
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 if not REDIS_URL:
     raise RuntimeError("REDIS_URL não definido")
 
-# se o REDIS_URL começa com rediss://, o SSL já é tratado pelo driver
 r = Redis.from_url(REDIS_URL, decode_responses=True)
 
 )
@@ -550,6 +548,7 @@ def index():
 # -------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
+
 
 
 
