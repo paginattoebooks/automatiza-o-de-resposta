@@ -152,14 +152,11 @@ def saudacao():
     return "Boa noite"
 
 def normalize_phone(raw: str) -> str:
-    if not raw:
-        return ""
-    digits = re.sub(r"\D+", "", raw)
-    if digits.startswith("55") and len(digits) >= 12:
-        return f"+{digits}"
-    if len(digits) in (10, 11):
-        return f"+55{digits}"
-    return f"+{digits}" if not digits.startswith("+") else digits
+    import re
+    d = re.sub(r"\D+", "", raw or "")
+    if d.startswith("55") and len(d) >= 12: return d
+    if len(d) in (10,11): return "55"+d
+    return d
 
 def first_nonempty(*vals):
     for v in vals:
@@ -545,6 +542,7 @@ def index():
 # -------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
+
 
 
 
